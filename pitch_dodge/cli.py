@@ -33,7 +33,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-d", "--difficulty", choices=list(DIFFICULTIES), default="normal", help="starting difficulty"
     )
     parser.add_argument("--mute", action="store_true", help="play without sound")
-    parser.add_argument("--seed", type=int, help="random seed, for repeatable runs")
+    parser.add_argument(
+        "--latency-ms",
+        type=float,
+        default=0.0,
+        help="how late you hear the music, e.g. 150-250 for Bluetooth headphones "
+        "(the browser version can measure it)",
+    )
     parser.add_argument("--no-cache", action="store_true", help="re-analyse the song even if cached")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args(argv)
@@ -91,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     from .app import App  # imported late so --help is instant
 
     try:
-        App(args.song, difficulty=args.difficulty, mute=args.mute, seed=args.seed).run()
+        App(args.song, difficulty=args.difficulty, mute=args.mute, latency_ms=args.latency_ms).run()
     except KeyboardInterrupt:
         pass
     except ValueError as exc:  # e.g. a song too short to play

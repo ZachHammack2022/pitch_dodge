@@ -1,22 +1,23 @@
 """Turn an audio file into the data the game plays from.
 
-The game needs three things from a song:
+What the game takes from a song:
 
-* a pitch curve, normalised to 0..1, that decides how high each projectile
-  spawns;
-* onset times (drum hits, plucked notes...) that decide *when* projectiles
-  spawn, so the attack follows the music instead of a fixed timer;
-* a loudness envelope, used to make the background pulse.
+* a pitch curve, normalised to 0..1, that decides how high each note is;
+* the beat (tempo and beat times), which notes are snapped to;
+* onset strength, overall and split into harmonic (melody, chords) and
+  percussive (drums) parts, which decides where notes go and what kind;
+* the dominant pitch class over time, so sound effects can play in key;
+* a loudness envelope, for visuals and to scale intensity.
 
-Analysis takes a few seconds, so results are cached on disk keyed by the file's
-contents.
+Analysis takes several seconds, so results are cached on disk keyed by the
+file's contents.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,7 @@ SAMPLE_RATE = 22050
 HOP_LENGTH = 512
 FMIN = 65.0  # ~C2
 FMAX = 1000.0  # ~B5
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,11 @@ class SongAnalysis:
     onsets: np.ndarray  # seconds, ascending
     hop_seconds: float
     duration: float
+    beats: np.ndarray = field(default_factory=lambda: np.zeros(0))  # seconds, ascending
+    onset_strength: np.ndarray = field(default_factory=lambda: np.zeros(0))  # 0..1 per frame
+    harmonic_strength: np.ndarray = field(default_factory=lambda: np.zeros(0))  # 0..1 per frame
+    percussive_strength: np.ndarray = field(default_factory=lambda: np.zeros(0))  # 0..1 per frame
+    pitch_class: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))  # 0 = C .. 11 = B
 
     def _frame(self, t: float) -> int:
         i = int(t / self.hop_seconds)
@@ -47,6 +53,20 @@ class SongAnalysis:
 
     def energy_at(self, t: float) -> float:
         return float(self.energy[self._frame(t)])
+
+    def pitch_class_at(self, t: float) -> int:
+        if len(self.pitch_class) == 0:
+            return 0
+        return int(self.pitch_class[min(self._frame(t), len(self.pitch_class) - 1)])
+
+    def strength_at(self, t: float, which: str = "onset", window: float = 0.05) -> float:
+        """Peak onset strength within ``window`` seconds of ``t`` (which: onset/harmonic/percussive)."""
+        env = getattr(self, f"{which}_strength")
+        if len(env) == 0:
+            return 0.0
+        lo = min(max(int((t - window) / self.hop_seconds), 0), len(env) - 1)
+        hi = min(max(int((t + window) / self.hop_seconds) + 1, lo + 1), len(env))
+        return float(env[lo:hi].max())
 
 
 # ---------------------------------------------------------------- features
@@ -127,7 +147,25 @@ def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE) -> SongAnalysis:
     n = min(len(pitch), len(rms))
     energy = normalise_energy(rms[:n])
 
-    onsets = librosa.onset.onset_detect(y=y, sr=sr, hop_length=HOP_LENGTH, units="time")
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+    onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
+    _, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
+
+    # Split into harmonic (sustained: melody, chords) and percussive (drums) parts.
+    stft = librosa.stft(y, hop_length=HOP_LENGTH)
+    harmonic, percussive = librosa.decompose.hpss(stft)
+    harm_env = librosa.onset.onset_strength(
+        S=librosa.amplitude_to_db(np.abs(harmonic), ref=np.max), sr=sr, hop_length=HOP_LENGTH
+    )
+    perc_env = librosa.onset.onset_strength(
+        S=librosa.amplitude_to_db(np.abs(percussive), ref=np.max), sr=sr, hop_length=HOP_LENGTH
+    )
+    chroma = librosa.feature.chroma_stft(S=np.abs(harmonic) ** 2, sr=sr, hop_length=HOP_LENGTH)
+    pitch_class = chroma.argmax(axis=0)
+
+    def fit(a):
+        a = np.asarray(a, dtype=float)[:n]
+        return np.pad(a, (0, n - len(a)), mode="edge") if 0 < len(a) < n else a
 
     return SongAnalysis(
         pitch=pitch[:n],
@@ -135,6 +173,11 @@ def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE) -> SongAnalysis:
         onsets=np.asarray(onsets, dtype=float),
         hop_seconds=HOP_LENGTH / sr,
         duration=len(y) / sr,
+        beats=np.asarray(beats, dtype=float),
+        onset_strength=normalise_energy(fit(onset_env)),
+        harmonic_strength=normalise_energy(fit(harm_env)),
+        percussive_strength=normalise_energy(fit(perc_env)),
+        pitch_class=fit(pitch_class).astype(int),
     )
 
 
@@ -172,13 +215,10 @@ def analyse_file(path: str | os.PathLike, cache_dir: Path | None = None) -> Song
         if cache_file.exists():
             try:
                 with np.load(cache_file) as data:
-                    return SongAnalysis(
-                        pitch=data["pitch"],
-                        energy=data["energy"],
-                        onsets=data["onsets"],
-                        hop_seconds=float(data["hop_seconds"]),
-                        duration=float(data["duration"]),
-                    )
+                    values = {f.name: data[f.name] for f in fields(SongAnalysis)}
+                values["hop_seconds"] = float(values["hop_seconds"])
+                values["duration"] = float(values["duration"])
+                return SongAnalysis(**values)
             except (OSError, KeyError, ValueError):
                 pass  # corrupt or stale; re-analyse
 
@@ -190,14 +230,7 @@ def analyse_file(path: str | os.PathLike, cache_dir: Path | None = None) -> Song
     if cache_file is not None:
         try:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(
-                cache_file,
-                pitch=result.pitch,
-                energy=result.energy,
-                onsets=result.onsets,
-                hop_seconds=result.hop_seconds,
-                duration=result.duration,
-            )
+            np.savez(cache_file, **{f.name: getattr(result, f.name) for f in fields(SongAnalysis)})
         except OSError:
             pass  # caching is best-effort
     return result

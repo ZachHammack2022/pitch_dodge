@@ -31,6 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .analysis import analyse_file
+from .chart import build_chart
 from .scores import Entry, ScoreBoard
 from .world import DIFFICULTIES
 
@@ -118,9 +119,12 @@ class SongLibrary:
         return {
             "pitch": [round(float(v), 3) for v in song.pitch],
             "energy": [round(float(v), 3) for v in song.energy],
-            "onsets": [round(float(v), 4) for v in song.onsets],
             "hop_seconds": song.hop_seconds,
             "duration": song.duration,
+            "charts": {
+                name: {**build_chart(song, d).to_json(), "lives": d.lives, "paddle_height": d.paddle_height}
+                for name, d in DIFFICULTIES.items()
+            },
         }
 
     def add(self, filename: str, data: bytes) -> str:

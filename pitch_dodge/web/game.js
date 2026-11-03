@@ -16,52 +16,22 @@
   const TOP_MARGIN = 56;
   const SPAWN_MARGIN = 30;
 
-  const DIFFICULTIES = {
-    easy:   { name: 'easy',   lives: 5, baseSpeed: 300, speedGrowth: 0.5, startGap: 0.55, endGap: 0.30, maxGap: 1.2, vySpread: 60,  paddleHeight: 64 },
-    normal: { name: 'normal', lives: 3, baseSpeed: 360, speedGrowth: 0.8, startGap: 0.40, endGap: 0.18, maxGap: 0.9, vySpread: 110, paddleHeight: 72 },
-    hard:   { name: 'hard',   lives: 2, baseSpeed: 420, speedGrowth: 1.1, startGap: 0.28, endGap: 0.10, maxGap: 0.6, vySpread: 170, paddleHeight: 80 },
-  };
   const DIFFICULTY_ORDER = ['easy', 'normal', 'hard'];
 
   const PADDLE_WIDTH = 14;
   const PADDLE_X = WIDTH - 110;
   const PADDLE_SPEED = 560;
   const NOTE_RADIUS = 9;
-  const INVULNERABLE_FOR = 1.2;
-  const NEAR_MISS_DISTANCE = 18;
-  const POINTS_DODGE = 10;
-  const POINTS_NEAR_MISS = 15;
+  const INVULNERABLE_FOR = 1.0;
+  const POINTS_CATCH = 10;
+  const POINTS_PERFECT = 15;
+  const PERFECT_FRACTION = 0.3;
   const STREAK_PER_LEVEL = 10;
   const MAX_MULTIPLIER = 8;
   const POINTS_PER_LIFE_LEFT = 250;
-  const MAX_STEP = 1 / 120;
   const MAX_FRAME = 1 / 20;
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
-
-  function buildSpawnSchedule(onsets, duration, d, leadIn = 1.0) {
-    if (duration <= 0) return [];
-    const minGap = (t) => d.startGap + (d.endGap - d.startGap) * clamp(t / duration, 0, 1);
-    const times = [];
-    let last = leadIn - d.maxGap;
-    const sorted = Array.from(onsets).sort((a, b) => a - b);
-    for (const t of sorted) {
-      if (t < leadIn || t >= duration) continue;
-      while (t - last > d.maxGap) {
-        last += d.maxGap;
-        if (last >= leadIn) times.push(last);
-      }
-      if (t - last >= minGap(t)) {
-        times.push(t);
-        last = t;
-      }
-    }
-    while (duration - last > d.maxGap) {
-      last += d.maxGap;
-      if (last < duration) times.push(last);
-    }
-    return times;
-  }
 
   function pitchToY(pitch) {
     const top = TOP_MARGIN + SPAWN_MARGIN;
@@ -69,88 +39,89 @@
     return bottom - clamp(pitch, 0, 1) * (bottom - top);
   }
 
-  function mulberry32(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a = (a + 0x6d2b79f5) >>> 0;
-      let t = a;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
   class Song {
     constructor(data) {
       this.pitch = Float32Array.from(data.pitch);
       this.energy = Float32Array.from(data.energy);
-      this.onsets = data.onsets;
       this.hop = data.hop_seconds;
       this.duration = data.duration;
+      this.charts = data.charts;
     }
     frame(t) { return clamp(Math.floor(t / this.hop), 0, this.pitch.length - 1); }
     pitchAt(t) { return this.pitch[this.frame(t)]; }
-    energyAt(t) { return this.energy[this.frame(t)]; }
+    energyAt(t) { return t < 0 ? 0 : this.energy[this.frame(t)]; }
   }
 
+  /**
+   * Plays a chart from the server (see chart.py). A note's position comes
+   * straight from song time, x = PADDLE_X - (arrival - now) * speed, so it
+   * crosses the paddle exactly on its beat whatever the frame rate.
+   */
   class World {
-    constructor(song, difficulty, seed) {
+    constructor(song, chart) {
       this.song = song;
-      this.d = difficulty;
-      this.rand = mulberry32(seed == null ? (Math.random() * 2 ** 32) : seed);
+      this.chart = chart;
       this.notes = [];
       this.score = 0;
-      this.streak = 0;
+      this.streak = 0; // combo
       this.bestStreak = 0;
-      this.dodged = 0;
-      this.hits = 0;
-      this.songTime = 0;
-      this.invulnerableUntil = -1;
+      this.caught = 0;
+      this.perfect = 0;
+      this.missed = 0;
+      this.hits = 0; // hazards that hit
+      this.songTime = -chart.count_in;
+      this.invulnerableUntil = -1e9;
       this.over = false;
       this.cleared = false;
-      this.lives = difficulty.lives;
-      this.paddle = { x: PADDLE_X, y: (TOP_MARGIN + HEIGHT) / 2, width: PADDLE_WIDTH, height: difficulty.paddleHeight };
-      this.schedule = buildSpawnSchedule(song.onsets, song.duration, difficulty);
-      this.nextSpawn = 0;
+      this.maxLives = chart.lives;
+      this.lives = chart.lives;
+      this.paddle = { x: PADDLE_X, y: (TOP_MARGIN + HEIGHT) / 2, width: PADDLE_WIDTH, height: chart.paddle_height };
+      this.next = 0;
     }
 
-    get progress() { return this.song.duration <= 0 ? 1 : clamp(this.songTime / this.song.duration, 0, 1); }
+    get duration() { return this.chart.duration; }
+    get progress() { return this.duration <= 0 ? 1 : clamp(this.songTime / this.duration, 0, 1); }
     get multiplier() { return Math.min(1 + Math.floor(this.streak / STREAK_PER_LEVEL), MAX_MULTIPLIER); }
     get invulnerable() { return this.songTime < this.invulnerableUntil; }
-    get speed() { return this.d.baseSpeed * (1 + this.d.speedGrowth * this.progress); }
+    get speed() { return this.chart.speed; }
+    get accuracy() { const n = this.caught + this.missed; return n ? this.caught / n : 0; }
+
+    xAt(noteT, now) { return PADDLE_X - (noteT - now) * this.chart.speed; }
 
     movePaddle(direction, dt) {
       const p = this.paddle;
       p.y = clamp(p.y + direction * PADDLE_SPEED * dt, TOP_MARGIN + p.height / 2, HEIGHT - p.height / 2);
     }
 
-    gapTo(note) {
+    gapY(note) {
       const p = this.paddle;
-      const cx = clamp(note.x, p.x, p.x + p.width);
-      const cy = clamp(note.y, p.y - p.height / 2, p.y + p.height / 2);
-      return Math.hypot(note.x - cx, note.y - cy) - note.radius;
+      return Math.max(p.y - p.height / 2 - note.y, note.y - (p.y + p.height / 2), 0) - note.radius;
     }
 
     update(songTime, dt, direction) {
       const events = [];
       if (this.over || this.cleared) return events;
+      const prev = this.songTime;
       this.songTime = songTime;
       this.movePaddle(direction, dt);
 
-      while (this.nextSpawn < this.schedule.length && this.schedule[this.nextSpawn] <= songTime) {
-        this.spawn(this.schedule[this.nextSpawn++], events);
+      const notes = this.chart.notes;
+      while (this.next < notes.length && notes[this.next].t - this.chart.travel_time <= songTime) {
+        const c = notes[this.next++];
+        const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength, midi: c.midi,
+                    radius: NOTE_RADIUS * (0.85 + 0.4 * c.strength), x: -NOTE_RADIUS,
+                    passed: false, hit: false };
+        this.notes.push(n);
+        events.push({ kind: 'spawn', x: 0, y: n.y });
       }
 
-      const steps = Math.max(1, Math.ceil(dt / MAX_STEP));
-      for (let s = 0; s < steps; s++) {
-        for (const n of this.notes) {
-          this.step(n, dt / steps, events);
-          if (this.over) return events;
-        }
+      for (const n of this.notes) {
+        this.step(n, prev, songTime, events);
+        if (this.over) return events;
       }
       this.notes = this.notes.filter((n) => !n.hit && n.x - n.radius < WIDTH);
 
-      if (songTime >= this.song.duration && this.nextSpawn >= this.schedule.length && this.notes.length === 0) {
+      if (songTime >= this.duration && this.next >= notes.length && this.notes.length === 0) {
         this.cleared = true;
         const bonus = this.lives * POINTS_PER_LIFE_LEFT;
         this.score += bonus;
@@ -159,57 +130,54 @@
       return events;
     }
 
-    spawn(t, events) {
-      const pitch = this.song.pitchAt(t);
-      const y = pitchToY(pitch);
-      const speed = this.speed * (0.85 + this.rand() * 0.3);
-      const vy = (this.rand() * 2 - 1) * this.d.vySpread * (0.5 + this.progress);
-      this.notes.push({ x: -NOTE_RADIUS, y, vx: speed, vy, pitch, radius: NOTE_RADIUS,
-                        passed: false, hit: false, ghosted: false, closestGap: Infinity });
-      events.push({ kind: 'spawn', x: 0, y });
+    step(n, prev, now, events) {
+      const xPrev = this.xAt(n.t, prev);
+      n.x = this.xAt(n.t, now);
+      if (n.passed) return;
+      const p = this.paddle;
+      const crossing = xPrev - n.radius <= p.x + p.width && n.x + n.radius >= p.x;
+      const touching = crossing && this.gapY(n) < 0;
+      const gone = n.x - n.radius > p.x + p.width;
+      if (n.kind === 'hazard') {
+        if (touching && !this.invulnerable) this.hurt(n, events);
+        else if (gone) n.passed = true;
+      } else if (touching) {
+        this.catch(n, events);
+      } else if (gone) {
+        n.passed = true;
+        this.missed++;
+        this.streak = 0;
+        events.push({ kind: 'miss', x: n.x, y: n.y });
+      }
     }
 
-    step(n, dt, events) {
-      n.x += n.vx * dt;
-      n.y += n.vy * dt;
-      const top = TOP_MARGIN + n.radius;
-      const bottom = HEIGHT - n.radius;
-      if (n.y < top) { n.y = 2 * top - n.y; n.vy = Math.abs(n.vy); }
-      else if (n.y > bottom) { n.y = 2 * bottom - n.y; n.vy = -Math.abs(n.vy); }
-      if (n.passed) return;
-
-      const gap = this.gapTo(n);
-      if (gap < 0 && this.invulnerable) {
-        n.ghosted = true;
-      } else if (gap < 0) {
-        n.hit = n.passed = true;
-        this.hits++;
-        this.lives--;
-        this.streak = 0;
-        this.invulnerableUntil = this.songTime + INVULNERABLE_FOR;
-        events.push({ kind: 'hit', x: n.x, y: n.y, value: this.lives });
-        if (this.lives <= 0) {
-          this.over = true;
-          events.push({ kind: 'game_over', value: this.score });
-        }
-        return;
+    catch(n, events) {
+      n.hit = n.passed = true;
+      const oldLevel = this.multiplier;
+      const perfect = Math.abs(n.y - this.paddle.y) <= (this.paddle.height / 2) * PERFECT_FRACTION;
+      this.caught++;
+      if (perfect) this.perfect++;
+      this.streak++;
+      this.bestStreak = Math.max(this.bestStreak, this.streak);
+      const points = (perfect ? POINTS_PERFECT : POINTS_CATCH) * oldLevel;
+      this.score += points;
+      events.push({ kind: perfect ? 'perfect' : 'catch', x: n.x, y: n.y, value: points, midi: n.midi });
+      if (this.multiplier > oldLevel) {
+        events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier, midi: n.midi });
       }
+    }
 
-      if (n.x - n.radius > this.paddle.x + this.paddle.width) {
-        n.passed = true;
-        if (n.ghosted) return;
-        const oldLevel = this.multiplier;
-        this.dodged++;
-        this.streak++;
-        this.bestStreak = Math.max(this.bestStreak, this.streak);
-        const near = n.closestGap < NEAR_MISS_DISTANCE;
-        const points = (near ? POINTS_NEAR_MISS : POINTS_DODGE) * oldLevel;
-        this.score += points;
-        events.push({ kind: near ? 'near_miss' : 'dodge', x: n.x, y: n.y, value: points });
-        if (this.multiplier > oldLevel) events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier });
-        return;
+    hurt(n, events) {
+      n.hit = n.passed = true;
+      this.hits++;
+      this.lives--;
+      this.streak = 0;
+      this.invulnerableUntil = this.songTime + INVULNERABLE_FOR;
+      events.push({ kind: 'hit', x: n.x, y: n.y, value: this.lives });
+      if (this.lives <= 0) {
+        this.over = true;
+        events.push({ kind: 'game_over', value: this.score });
       }
-      n.closestGap = Math.min(n.closestGap, gap);
     }
   }
 
@@ -222,6 +190,7 @@
       this.source = null;
       this.startedAt = 0;
       this.muted = false;
+      this.offset = 0; // extra delay the player measured (seconds), e.g. for Bluetooth headphones
     }
 
     ensure() {
@@ -242,14 +211,15 @@
       this.buffer = await new Promise((resolve, reject) => ctx.decodeAudioData(arrayBuffer, resolve, reject));
     }
 
-    async play() {
+    /** Start the song ``countIn`` seconds from now; position() is negative until then. */
+    async play(countIn = 0) {
       const ctx = this.ensure();
       this.stop();
       if (ctx.state === 'suspended') await ctx.resume();
       this.source = ctx.createBufferSource();
       this.source.buffer = this.buffer;
       this.source.connect(this.musicGain);
-      this.startedAt = ctx.currentTime + 0.05;
+      this.startedAt = ctx.currentTime + Math.max(0.05, countIn);
       this.source.start(this.startedAt);
     }
 
@@ -268,7 +238,20 @@
     position() {
       if (!this.ctx || !this.source) return 0;
       const latency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
-      return Math.max(0, this.ctx.currentTime - this.startedAt - latency);
+      return this.ctx.currentTime - this.startedAt - latency - this.offset;
+    }
+
+    /** A metronome click at context time ``when`` (for calibration). */
+    click(when, accent) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.frequency.value = accent ? 1760 : 1320;
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.exponentialRampToValueAtTime(0.5, when + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.06);
+      osc.connect(g).connect(this.master);
+      osc.start(when);
+      osc.stop(when + 0.08);
     }
 
     setMuted(m) {
@@ -276,13 +259,19 @@
       if (this.master) this.master.gain.value = m ? 0 : 1;
     }
 
-    /** Small synthesised effects. */
-    sfx(kind) {
+    /**
+     * Small synthesised effects. Success sounds take the song's current pitch
+     * class (``midi``) so playing well adds notes in key instead of clashing.
+     */
+    sfx(kind, midi = 72) {
       if (!this.ctx || this.muted) return;
+      const hz = (m) => 440 * 2 ** ((m - 69) / 12);
       const presets = {
         hit:       { freqs: [110, 82], dur: 0.35, vol: 0.35, type: 'sawtooth' },
-        near_miss: { freqs: [1320, 1760], dur: 0.12, vol: 0.08, type: 'sine' },
-        level_up:  { freqs: [660, 880, 1320], dur: 0.35, vol: 0.1, type: 'triangle', arp: 0.06 },
+        catch:     { freqs: [hz(midi), hz(midi + 12)], dur: 0.3, vol: 0.08, type: 'triangle' },
+        perfect:   { freqs: [hz(midi), hz(midi + 12), hz(midi + 19)], dur: 0.35, vol: 0.09, type: 'triangle' },
+        miss:      { freqs: [hz(midi - 24)], dur: 0.12, vol: 0.03, type: 'sine' },
+        level_up:  { freqs: [hz(midi), hz(midi + 7), hz(midi + 12)], dur: 0.35, vol: 0.08, type: 'triangle', arp: 0.06 },
         game_over: { freqs: [196, 147, 98], dur: 0.9, vol: 0.2, type: 'triangle', arp: 0.18 },
         cleared:   { freqs: [523, 659, 784, 1047], dur: 0.9, vol: 0.12, type: 'triangle', arp: 0.1 },
       };
@@ -386,17 +375,26 @@
           this.shake = 0.35;
           this.flash = 0.25;
           this.popups.push({ text: 'OUCH', x: e.x - 110, y: e.y - 20, life: 0.8, color: COLORS.danger });
-        } else if (e.kind === 'near_miss') {
-          this.burst(e.x, e.y, COLORS.gold, 14, 220);
-          this.popups.push({ text: `CLOSE! +${e.value}`, x: e.x - 150, y: e.y - 24, life: 0.8, color: COLORS.gold });
-        } else if (e.kind === 'dodge') {
-          this.burst(e.x, e.y, COLORS.accent, 6, 140, 0.4, 2);
+        } else if (e.kind === 'perfect') {
+          this.burst(e.x, e.y, COLORS.gold, 18, 240);
+          this.judge(`PERFECT +${e.value}`, e.x - 170, e.y - 26, COLORS.gold);
+        } else if (e.kind === 'catch') {
+          this.burst(e.x, e.y, COLORS.accent, 10, 180, 0.5, 3);
+        } else if (e.kind === 'miss') {
+          this.burst(e.x, e.y, COLORS.dim, 6, 80, 0.4, 2);
+          this.judge('miss', e.x - 70, e.y - 20, COLORS.dim);
         } else if (e.kind === 'level_up') {
           this.popups.push({ text: `x${e.value}!`, x: WIDTH / 2 - 30, y: HEIGHT / 2 - 40, life: 1.0, color: COLORS.accent });
         } else if (e.kind === 'spawn') {
           this.burst(6, e.y, COLORS.text, 4, 90, 0.3, 2);
         }
       }
+    }
+
+    /** Catch/miss labels replace each other instead of piling up. */
+    judge(text, x, y, color) {
+      this.popups = this.popups.filter((p) => !p.judge);
+      this.popups.push({ text, x, y, life: 0.45, color, judge: true });
     }
 
     tick(dt) {
@@ -413,6 +411,37 @@
     }
 
     clearEffects() { this.particles = []; this.popups = []; this.shake = this.flash = 0; }
+
+    /** How hard the beat is hitting right now: 1 on a beat, decaying to 0; downbeats (every 4th) hit harder. */
+    beatPulse(beats, t) {
+      let lo = 0, hi = beats.length - 1, i = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (beats[mid] <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      if (i < 0) return 0;
+      const strength = i % 4 === 0 ? 1 : 0.6;
+      return strength * Math.exp(-(t - beats[i]) * 8);
+    }
+
+    hazard(x, y, r, t) {
+      const c = this.ctx;
+      this.blitGlow('hsl(352, 100%, 66%)', Math.round(r * 0.6), x, y);
+      c.fillStyle = COLORS.danger;
+      c.beginPath();
+      for (let i = 0; i < 16; i++) {
+        const a = t * 3 + (i * Math.PI * 2) / 16;
+        const rr = r * (i % 2 === 0 ? 1 : 0.5);
+        const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+        i ? c.lineTo(px, py) : c.moveTo(px, py);
+      }
+      c.closePath();
+      c.fill();
+      c.fillStyle = '#280812';
+      c.beginPath();
+      c.arc(x, y, Math.max(2, r * 0.32), 0, Math.PI * 2);
+      c.fill();
+    }
 
     background() {
       const g = this.ctx.createLinearGradient(0, 0, 0, HEIGHT);
@@ -447,40 +476,56 @@
       }
       this.background();
 
-      // Grid pulsing with loudness.
+      // Grid pulsing with loudness and the beat.
       const energy = w.song.energyAt(t);
-      c.strokeStyle = `rgba(120, 90, 220, ${(10 + 30 * energy) / 255})`;
+      const pulse = t >= 0 ? this.beatPulse(w.chart.beats, t) : 0;
+      c.strokeStyle = `rgba(120, 90, 220, ${(10 + 30 * energy + 40 * pulse) / 255})`;
       c.lineWidth = 1;
       c.beginPath();
       for (let x = 0; x < WIDTH; x += 48) { c.moveTo(x + 0.5, TOP_MARGIN); c.lineTo(x + 0.5, HEIGHT); }
       for (let y = TOP_MARGIN; y < HEIGHT; y += 48) { c.moveTo(0, y + 0.5); c.lineTo(WIDTH, y + 0.5); }
       c.stroke();
 
-      // The recent melody: a note fired at time s is now at x = speed * (t - s).
+      // Upcoming beats as lines scrolling toward the paddle (every 4th brighter).
+      const beats = w.chart.beats;
+      for (let i = 0; i < beats.length; i++) {
+        const x = PADDLE_X - (beats[i] - t) * w.speed;
+        if (x < 0) break;
+        if (x > PADDLE_X + 4) continue;
+        c.fillStyle = i % 4 === 0 ? 'rgba(160, 140, 255, 0.16)' : 'rgba(160, 140, 255, 0.07)';
+        c.fillRect(x - 1, TOP_MARGIN, 2, HEIGHT - TOP_MARGIN);
+      }
+
+      // The melody path: a line through the upcoming catch notes, where they will be.
       c.strokeStyle = '#5a46a0';
       c.lineWidth = 2;
       c.beginPath();
       let started = false;
-      for (let x = 0; x <= WIDTH; x += 8) {
-        const s = t - x / w.speed;
-        if (s < 0) break;
-        const y = pitchToY(w.song.pitchAt(s));
+      for (const n of w.chart.notes) {
+        if (n.kind !== 'catch') continue;
+        const x = w.xAt(n.t, t);
+        if (x > PADDLE_X + 40) continue;
+        const y = pitchToY(n.pitch);
         started ? c.lineTo(x, y) : c.moveTo(x, y);
         started = true;
+        if (x < -40) break;
       }
       c.stroke();
-      this.blitGlow(pitchColor(w.song.pitchAt(t)), 7 + Math.round(5 * energy), 4, pitchToY(w.song.pitchAt(t)));
+      const ahead = t + w.chart.travel_time;
+      if (ahead >= 0 && ahead <= w.duration) {
+        const pitch = w.song.pitchAt(ahead);
+        this.blitGlow(pitchColor(pitch), 7 + Math.round(5 * energy + 4 * pulse), 4, pitchToY(pitch));
+      }
 
-      // Notes with trails.
+      // Notes with trails; hazards are spinning red spikes.
       for (const n of w.notes) {
+        if (n.kind === 'hazard') { this.hazard(n.x, n.y, n.radius * 1.4, t); continue; }
         const color = pitchColor(n.pitch);
-        const sp = Math.hypot(n.vx, n.vy) || 1;
         for (let i = 3; i >= 1; i--) {
           c.globalAlpha = 0.5 - i * 0.12;
           c.fillStyle = color;
           c.beginPath();
-          c.arc(n.x - (n.vx / sp) * i * n.radius * 0.9, n.y - (n.vy / sp) * i * n.radius * 0.9,
-                Math.max(2, n.radius - i * 2), 0, Math.PI * 2);
+          c.arc(n.x - i * n.radius * 0.9, n.y, Math.max(2, n.radius - i * 2), 0, Math.PI * 2);
           c.fill();
         }
         c.globalAlpha = 1;
@@ -491,8 +536,9 @@
       const p = w.paddle;
       if (!w.invulnerable || Math.floor(t * 12) % 2 === 0) {
         const top = p.y - p.height / 2;
-        c.fillStyle = 'rgba(120, 255, 170, 0.2)';
-        roundRect(c, p.x - 12, top - 12, p.width + 24, p.height + 24, 14);
+        const grow = 12 + 6 * pulse;
+        c.fillStyle = `rgba(120, 255, 170, ${0.18 + 0.3 * pulse})`;
+        roundRect(c, p.x - grow, top - grow, p.width + 2 * grow, p.height + 2 * grow, 14);
         c.fillStyle = COLORS.accent;
         roundRect(c, p.x, top, p.width, p.height, 6);
         c.fillStyle = '#dcffe6';
@@ -517,6 +563,15 @@
       c.globalAlpha = 1;
       c.restore();
 
+      if (t < 0) {  // count-in
+        c.font = '800 96px -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif';
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        c.fillStyle = 'rgba(235, 235, 245, 0.55)';
+        c.fillText(String(Math.floor(-t) + 1), WIDTH / 2, HEIGHT / 2);
+        c.textAlign = 'left';
+      }
+
       if (this.flash > 0) {
         c.fillStyle = `rgba(255, 40, 60, ${0.47 * this.flash / 0.25})`;
         c.fillRect(0, 0, WIDTH, HEIGHT);
@@ -540,11 +595,11 @@
       c.fillText(`x${w.multiplier}`, 190, 27);
       c.font = font(14);
       c.fillStyle = COLORS.dim;
-      c.fillText(`streak ${w.streak}`, 240, 28);
+      c.fillText(`combo ${w.streak}`, 240, 28);
       if (best) c.fillText(`best ${best.toLocaleString()}`, 340, 28);
       if (muted) c.fillText('muted', 450, 28);
 
-      for (let i = 0; i < w.d.lives; i++) {
+      for (let i = 0; i < w.maxLives; i++) {
         const cx = WIDTH - 24 - i * 26;
         c.beginPath();
         c.moveTo(cx, 18); c.lineTo(cx + 9, 28); c.lineTo(cx, 38); c.lineTo(cx - 9, 28); c.closePath();
@@ -594,8 +649,8 @@
     keys: new Set(),
     t: 0,
     lastFrame: performance.now(),
-    seed: params.has('seed') ? Number(params.get('seed')) : null,
     autoplay: params.has('autoplay'),
+    latency: 0, // ms, see setLatency
   };
   const audio = new Audio();
   const renderer = new Renderer($('game'));
@@ -615,6 +670,7 @@
     $('menu').classList.toggle('hidden', !(screen === 'menu' || screen === 'loading'));
     $('paused').classList.toggle('hidden', screen !== 'paused');
     $('results').classList.toggle('hidden', screen !== 'results');
+    $('calibrate').classList.toggle('hidden', screen !== 'calibrate');
     $('play').disabled = screen === 'loading' || !state.selected;
   }
 
@@ -728,9 +784,9 @@
       setStatus(`Couldn't load ${sel.name}: ${e.message}`, true);
       return;
     }
-    state.world = new World(state.loaded.song, DIFFICULTIES[state.difficulty], state.seed);
+    state.world = new World(state.loaded.song, state.loaded.song.charts[state.difficulty]);
     renderer.clearEffects();
-    await audio.play();
+    await audio.play(state.world.chart.count_in);
     show('playing');
   }
 
@@ -760,11 +816,10 @@
     $('results-title').textContent = w.cleared ? 'SONG CLEARED' : 'GAME OVER';
     $('results-title').style.color = w.cleared ? COLORS.accent : COLORS.danger;
     $('results-score').textContent = w.score.toLocaleString();
-    const total = w.dodged + w.hits;
     const stats = [
-      ['dodged', w.dodged], ['hits', w.hits],
-      ['accuracy', `${total ? Math.round((100 * w.dodged) / total) : 0}%`],
-      ['best streak', w.bestStreak], ['song', `${Math.round(w.progress * 100)}%`],
+      ['caught', `${w.caught} (${w.perfect} perfect)`], ['missed', w.missed],
+      ['accuracy', `${Math.round(w.accuracy * 100)}%`], ['hazards hit', w.hits],
+      ['best combo', w.bestStreak], ['song', `${Math.round(w.progress * 100)}%`],
     ];
     $('results-stats').innerHTML = '';
     for (const [k, v] of stats) {
@@ -792,6 +847,115 @@
     localStorageSet('muted', audio.muted ? '1' : '');
   }
 
+  // ---------------- audio delay (latency) calibration
+
+  const CALIBRATE = { clicks: 16, interval: 0.6, skip: 4, minTaps: 6 };
+  const LATENCY_MIN = -100, LATENCY_MAX = 400;
+  const cal = { running: false, clicks: [], taps: [], result: null, endAt: 0 };
+
+  function setLatency(ms) {
+    ms = clamp(Math.round(ms / 5) * 5, LATENCY_MIN, LATENCY_MAX);
+    state.latency = ms;
+    audio.offset = ms / 1000;
+    $('latency').value = String(ms);
+    $('latency-value').textContent = `${ms > 0 ? '+' : ''}${ms} ms`;
+    localStorageSet('latency', String(ms));
+  }
+
+  /**
+   * Median of (tap - click - reported output latency) for taps matched to a
+   * click, ignoring the first few clicks while the player finds the beat.
+   * Whatever the browser already reports as output latency is compensated
+   * automatically, so this is only the remainder.
+   */
+  function measureOffset(clicks, taps, outputLatency) {
+    const diffs = [];
+    for (const tap of taps) {
+      let best = -1;
+      for (let i = 0; i < clicks.length; i++) {
+        if (best < 0 || Math.abs(tap - clicks[i]) < Math.abs(tap - clicks[best])) best = i;
+      }
+      // A tap belongs to the click before it if it's late, so allow up to most of an interval.
+      if (best >= CALIBRATE.skip && Math.abs(tap - clicks[best]) < CALIBRATE.interval * 0.8) {
+        diffs.push(tap - clicks[best] - outputLatency);
+      }
+    }
+    if (diffs.length < CALIBRATE.minTaps) return null;
+    diffs.sort((a, b) => a - b);
+    const mid = diffs.length >> 1;
+    const median = diffs.length % 2 ? diffs[mid] : (diffs[mid - 1] + diffs[mid]) / 2;
+    return median * 1000;
+  }
+
+  function openCalibration() {
+    cal.running = false;
+    cal.result = null;
+    $('calibrate-dots').textContent = '';
+    $('calibrate-result').textContent = '';
+    $('calibrate-hint').textContent = `Current delay: ${state.latency} ms`;
+    $('calibrate-start').classList.remove('hidden');
+    $('calibrate-save').classList.add('hidden');
+    show('calibrate');
+  }
+
+  async function startCalibration() {
+    const ctx = audio.ensure();
+    if (ctx.state === 'suspended') await ctx.resume();
+    audio.stop();
+    const t0 = ctx.currentTime + 0.6;
+    cal.clicks = [];
+    cal.taps = [];
+    for (let i = 0; i < CALIBRATE.clicks; i++) {
+      const t = t0 + i * CALIBRATE.interval;
+      cal.clicks.push(t);
+      audio.click(t, i % 4 === 0);
+    }
+    cal.endAt = cal.clicks[cal.clicks.length - 1] + 0.8;
+    cal.running = true;
+    cal.result = null;
+    $('calibrate-result').textContent = '';
+    $('calibrate-hint').textContent = 'Listen, then tap along…';
+    $('calibrate-start').classList.add('hidden');
+    $('calibrate-save').classList.add('hidden');
+  }
+
+  function calibrationTap() {
+    if (!cal.running) return;
+    cal.taps.push(audio.ctx.currentTime);
+  }
+
+  function tickCalibration() {
+    if (!cal.running) return;
+    const now = audio.ctx.currentTime - (audio.ctx.outputLatency || 0);
+    const heard = cal.clicks.filter((c) => c <= now).length;
+    $('calibrate-dots').textContent = '●'.repeat(heard) + '○'.repeat(CALIBRATE.clicks - heard);
+    if (audio.ctx.currentTime < cal.endAt) return;
+    cal.running = false;
+    const ms = measureOffset(cal.clicks, cal.taps, audio.ctx.outputLatency || 0);
+    $('calibrate-start').classList.remove('hidden');
+    $('calibrate-start').firstChild.textContent = 'Try again ';
+    if (ms == null) {
+      $('calibrate-hint').textContent = 'Not enough taps landed near the clicks. Try again?';
+      return;
+    }
+    cal.result = clamp(Math.round(ms / 5) * 5, LATENCY_MIN, LATENCY_MAX);
+    $('calibrate-result').textContent = `${cal.result > 0 ? '+' : ''}${cal.result} ms`;
+    $('calibrate-hint').textContent = 'Use this delay? (Enter)';
+    $('calibrate-save').classList.remove('hidden');
+  }
+
+  function saveCalibration() {
+    if (cal.result == null) return;
+    setLatency(cal.result);
+    toMenu();
+  }
+
+  $('latency').addEventListener('input', (e) => setLatency(Number(e.target.value)));
+  $('calibrate-open').addEventListener('click', openCalibration);
+  $('calibrate-start').addEventListener('click', startCalibration);
+  $('calibrate-save').addEventListener('click', saveCalibration);
+  $('calibrate-cancel').addEventListener('click', () => { cal.running = false; toMenu(); });
+
   // ---------------- input
 
   function direction() {
@@ -802,22 +966,21 @@
     return (down ? 1 : 0) - (up ? 1 : 0);
   }
 
+  /** Chase the next catch note, sidestepping hazards (for demos and tests: ?autoplay). */
   function botDirection() {
-    const w = state.world;
-    const p = w.paddle;
-    const mid = (HEIGHT + TOP_MARGIN) / 2;
-    const incoming = w.notes.filter((n) => !n.passed && n.x < p.x && p.x - n.x < 260);
-    let target = mid;
-    if (incoming.length) {
-      const n = incoming.reduce((a, b) => (p.x - a.x < p.x - b.x ? a : b));
-      const ny = n.y + n.vy * ((p.x - n.x) / Math.max(n.vx, 1));
-      const gap = p.height / 2 + n.radius + 14;
-      if (Math.abs(ny - p.y) > gap) return 0;
-      target = ny < mid ? ny + gap : ny - gap;
+    const p = state.world.paddle;
+    const ahead = state.world.notes.filter((n) => !n.passed && n.x < p.x + p.width);
+    const catches = ahead.filter((n) => n.kind === 'catch').sort((a, b) => a.t - b.t);
+    let target = catches.length ? catches[0].y : p.y;
+    for (const h of ahead) {
+      if (h.kind !== 'hazard' || p.x - h.x > 120) continue;
+      const clear = p.height / 2 + h.radius * 1.5 + 8;
+      if (Math.abs(h.y - target) < clear - 2) target = h.y + (target >= h.y ? 1 : -1) * clear;
     }
     const d = target - p.y;
-    return Math.abs(d) < 4 ? 0 : Math.sign(d);
+    return Math.abs(d) < 3 ? 0 : Math.sign(d);
   }
+
 
   window.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -828,6 +991,11 @@
 
     if (code === 'KeyM') return toggleMute();
     switch (state.screen) {
+      case 'calibrate':
+        if (code === 'Space') (cal.running ? calibrationTap() : startCalibration());
+        else if (code === 'Enter') saveCalibration();
+        else if (code === 'Escape') { cal.running = false; toMenu(); }
+        break;
       case 'menu':
         if (code === 'Space' || code === 'Enter') start();
         else if (code === 'ArrowLeft' || code === 'ArrowRight') {
@@ -894,6 +1062,7 @@
     const frameDt = Math.min((now - state.lastFrame) / 1000, MAX_FRAME);
     state.lastFrame = now;
     state.t += frameDt;
+    if (state.screen === 'calibrate') tickCalibration();
 
     if (state.screen === 'playing') {
       const w = state.world;
@@ -901,12 +1070,12 @@
       const dt = clamp(songTime - w.songTime, 0, MAX_FRAME);
       const events = w.update(songTime, dt, direction());
       renderer.react(events);
-      for (const e of events) audio.sfx(e.kind);
+      for (const e of events) audio.sfx(e.kind, e.midi);
       if (w.over || w.cleared) finish();
     }
     if (state.screen !== 'paused') renderer.tick(frameDt);
 
-    if (state.world && state.screen !== 'menu' && state.screen !== 'loading') {
+    if (state.world && !['menu', 'loading', 'calibrate'].includes(state.screen)) {
       renderer.worldScene(state.world);
       renderer.hud(state.world, state.best, audio.muted);
     } else {
@@ -916,9 +1085,10 @@
   }
 
   // Exposed for tests and the curious.
-  window.PitchDodge = { state, World, Song, buildSpawnSchedule, DIFFICULTIES };
+  window.PitchDodge = { state, World, Song, measureOffset, audio, cal };
 
   audio.setMuted(!!localStorageGet('muted'));
+  setLatency(Number(localStorageGet('latency') || 0));
   renderDifficulty();
   show('menu');
   refreshSongs();

@@ -8,7 +8,8 @@ from pathlib import Path
 import pygame
 
 from .analysis import SongAnalysis, analyse_file
-from .audio import open_player
+from .audio import CountInClock, open_player
+from .chart import build_chart
 from .render import Renderer
 from .scores import Entry, ScoreBoard
 from .sfx import Sfx
@@ -29,6 +30,7 @@ class App:
         max_frames: int | None = None,
         autoplay: bool = False,
         start_playing: bool = False,
+        latency_ms: float = 0.0,
     ):
         self.song_path = str(song_path)
         self.song_name = Path(song_path).stem.replace("_", " ")
@@ -39,6 +41,7 @@ class App:
         self.max_frames = max_frames
         self.autoplay = autoplay  # a simple bot, for demos and smoke tests
         self.start_playing = start_playing
+        self.latency = latency_ms / 1000  # how late the player hears the music (e.g. Bluetooth)
 
         pygame.init()
         flags = pygame.SCALED | pygame.RESIZABLE
@@ -51,6 +54,7 @@ class App:
         self.world: World | None = None
         self.song: SongAnalysis | None = None
         self.player = None
+        self.song_clock: CountInClock | None = None
         self.sfx: Sfx | None = None
         self.rank: int | None = None
         self.t = 0.0
@@ -75,16 +79,20 @@ class App:
 
     def _start(self) -> None:
         assert self.song is not None and self.player is not None
-        self.world = World(self.song, DIFFICULTIES[self.difficulty], seed=self.seed)
+        difficulty = DIFFICULTIES[self.difficulty]
+        chart = build_chart(self.song, difficulty)
+        self.world = World(chart, difficulty)
         self.renderer.clear_effects()
         self.rank = None
-        self.player.stop()
-        self.player.play()
+        if self.song_clock is not None:
+            self.song_clock.stop()
+        self.song_clock = CountInClock(self.player, chart.count_in)
+        self.song_clock.play()
         self.state = "playing"
 
     def _finish(self) -> None:
         assert self.world is not None
-        self.player.stop()
+        self.song_clock.stop()
         entry = Entry(
             score=self.world.score,
             best_streak=self.world.best_streak,
@@ -121,14 +129,14 @@ class App:
                 self._start()
         elif self.state == "playing":
             if k in (pygame.K_p, pygame.K_ESCAPE):
-                self.player.pause()
+                self.song_clock.pause()
                 self.state = "paused"
         elif self.state == "paused":
             if k in (pygame.K_p, pygame.K_ESCAPE, pygame.K_SPACE):
-                self.player.resume()
+                self.song_clock.resume()
                 self.state = "playing"
             elif k == pygame.K_q:
-                self.player.stop()
+                self.song_clock.stop()
                 self.state = "title"
             elif k == pygame.K_r:
                 self._start()
@@ -149,22 +157,17 @@ class App:
         return float(down) - float(up)
 
     def _bot_direction(self) -> float:
-        """Steer away from the nearest incoming note (good enough to look alive)."""
+        """Chase the next catch note, sidestepping hazards (good enough to look alive)."""
         w = self.world
         p = w.paddle
-        incoming = [n for n in w.notes if not n.passed and n.x < p.x and p.x - n.x < 260]
-        if not incoming:
-            target = (HEIGHT + 56) / 2
-        else:
-            n = min(incoming, key=lambda n: p.x - n.x)
-            eta = (p.x - n.x) / max(n.vx, 1)
-            ny = n.y + n.vy * eta
-            gap = p.height / 2 + n.radius + 14
-            if abs(ny - p.y) > gap:
-                return 0.0
-            target = ny + gap if ny < (HEIGHT + 56) / 2 else ny - gap
+        ahead = [n for n in w.notes if not n.passed and n.x < p.x + p.width]
+        catches = [n for n in ahead if n.kind == "catch"]
+        target = min(catches, key=lambda n: n.t).y if catches else p.y
+        for h in (n for n in ahead if n.kind == "hazard" and p.x - n.x < 120):
+            if abs(h.y - target) < p.height / 2 + h.radius * 1.5 + 6:
+                target = h.y + (1 if target >= h.y else -1) * (p.height / 2 + h.radius * 1.5 + 8)
         d = target - p.y
-        return 0.0 if abs(d) < 4 else (1.0 if d > 0 else -1.0)
+        return 0.0 if abs(d) < 3 else (1.0 if d > 0 else -1.0)
 
     # ------------------------------------------------------------ loop
 
@@ -190,12 +193,12 @@ class App:
     def _update(self, frame_dt: float) -> None:
         if self.state == "playing":
             w = self.world
-            song_time = self.player.position()
+            song_time = self.song_clock.position() - self.latency
             dt = min(max(song_time - w.song_time, 0.0), MAX_FRAME)
             events = w.update(song_time, dt, self._direction())
             self.renderer.react(events)
             for e in events:
-                self.sfx.play(e.kind)
+                self.sfx.play(e.kind, e.midi or 72)
             if w.over or w.cleared:
                 self._finish()
         if self.state != "paused":
@@ -207,7 +210,7 @@ class App:
             r.draw_title(self.song_name, self.difficulty, self.best, self.t)
             return
         w = self.world
-        r.draw_background(w, w.song_time)
+        r.draw_background(w, self.song, w.song_time)
         r.draw_world(w)
         r.draw_hud(w, self.best, self.mute)
         if self.state == "paused":

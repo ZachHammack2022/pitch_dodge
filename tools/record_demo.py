@@ -68,15 +68,10 @@ def main():
     grab(app.screen, 1.0).save(args.title)
 
     clock = SteppedClock(app.song.duration, args.start)
-    app.player = clock
     app._start()
-    app.world.song_time = args.start
-    # Skip the notes scheduled before the start point.
-    while (
-        app.world._next_spawn < len(app.world.schedule)
-        and app.world.schedule[app.world._next_spawn] < args.start - 2.5
-    ):
-        app.world._next_spawn += 1
+    app.song_clock = clock  # drive time frame by frame instead of from the music
+    # Start mid-song: drop notes that would already be on screen, then warm up.
+    app.world.skip_to(args.start)
 
     dt = 1 / args.fps
     frames = []
