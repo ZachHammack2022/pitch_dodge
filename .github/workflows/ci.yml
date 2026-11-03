@@ -6,11 +6,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
     env:
       SDL_VIDEODRIVER: dummy
       SDL_AUDIODRIVER: dummy
@@ -26,5 +30,7 @@ jobs:
         run: |
           ruff check .
           ruff format --check .
+          node --check pitch_dodge/web/game.js
+          bash -n setup.sh play.sh
       - name: Test
         run: pytest -q

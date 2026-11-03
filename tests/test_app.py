@@ -74,3 +74,10 @@ def test_cli_defaults():
     args = parse_args([])
     assert args.difficulty == "normal"
     assert args.song.endswith("jungle_waves.mp3")
+
+
+def test_serve_args():
+    from pitch_dodge.cli import parse_serve_args
+
+    args = parse_serve_args(["--port", "9000", "--no-browser"])
+    assert args.port == 9000 and args.no_browser and args.host == "127.0.0.1"

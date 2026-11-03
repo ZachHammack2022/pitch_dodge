@@ -20,8 +20,11 @@ dev = ["pytest>=7", "ruff>=0.5", "soundfile>=0.12", "pillow>=10"]
 [project.scripts]
 pitch-dodge = "pitch_dodge.cli:main"
 
-[tool.setuptools]
-packages = ["pitch_dodge"]
+[tool.setuptools.packages.find]
+include = ["pitch_dodge*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.html", "*.js", "*.css", "*.mp3", "*.wav", "*.ogg", "*.flac"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pitch_dodge.__version__" }

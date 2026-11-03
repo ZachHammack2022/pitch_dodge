@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pitch Dodge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="960" height="600" aria-label="Pitch Dodge game"></canvas>
+
+  <section id="menu" class="overlay">
+    <h1>PITCH DODGE</h1>
+    <p class="tag">dodge the melody</p>
+
+    <div class="panel">
+      <h2>Song</h2>
+      <ul id="songs" role="listbox" aria-label="Songs"></ul>
+      <label id="drop" class="drop">
+        <input id="file" type="file" accept=".mp3,.wav,.ogg,.flac,audio/*" hidden>
+        <span>Drop an mp3 / wav / ogg / flac here, or <u>choose a file</u></span>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Difficulty</h2>
+      <div id="difficulty" class="segmented" role="radiogroup">
+        <button data-d="easy">easy</button>
+        <button data-d="normal">normal</button>
+        <button data-d="hard">hard</button>
+      </div>
+      <p id="best" class="best"></p>
+    </div>
+
+    <button id="play" class="primary">Play <kbd>Space</kbd></button>
+    <p id="status" class="status" role="status"></p>
+    <p class="keys">
+      <kbd>↑</kbd><kbd>↓</kbd> or <kbd>W</kbd><kbd>S</kbd> move &nbsp;·&nbsp;
+      <kbd>P</kbd> pause &nbsp;·&nbsp; <kbd>M</kbd> mute &nbsp;·&nbsp; <kbd>R</kbd> restart
+    </p>
+  </section>
+
+  <section id="paused" class="overlay hidden">
+    <h1>PAUSED</h1>
+    <div class="row">
+      <button data-action="resume" class="primary">Resume <kbd>P</kbd></button>
+      <button data-action="restart">Restart <kbd>R</kbd></button>
+      <button data-action="menu">Menu <kbd>Q</kbd></button>
+    </div>
+  </section>
+
+  <section id="results" class="overlay hidden">
+    <h1 id="results-title">GAME OVER</h1>
+    <p id="results-score" class="big"></p>
+    <p id="results-rank" class="rank"></p>
+    <dl id="results-stats" class="stats"></dl>
+    <div class="row">
+      <button data-action="restart" class="primary">Play again <kbd>R</kbd></button>
+      <button data-action="menu">Menu <kbd>Enter</kbd></button>
+    </div>
+  </section>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

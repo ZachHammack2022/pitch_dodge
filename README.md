@@ -8,34 +8,60 @@ of the way, build a streak, and survive to the end of the song.
 
 ![Gameplay](docs/demo.gif)
 
-## Quick start
+## Play in your browser (macOS / Linux)
+
+You need Python 3.10 or newer. On a Mac, install it with
+[Homebrew](https://brew.sh) (`brew install python@3.12`) or the
+[python.org installer](https://www.python.org/downloads/macos/). The
+`python3` that comes with Xcode is too old.
 
 ```bash
-pip install -r requirements.txt
-python -m pitch_dodge                      # plays the bundled track
-python -m pitch_dodge path/to/song.mp3     # or any wav / mp3 / ogg / flac
+git clone https://github.com/ZachHammack2022/pitch_dodge.git
+cd pitch_dodge
+./setup.sh     # one time: creates .venv and installs everything
+./play.sh      # starts the server and opens http://localhost:8000
 ```
 
-Or install it as a command:
+Press **Space** to play. To play your own music, drag an mp3 / wav / ogg /
+flac onto the page. It's copied to `~/.local/share/pitch_dodge/songs`, and you
+can also drop files into that folder directly. Stop the server with
+**Ctrl+C**.
+
+`./play.sh` passes options through to `pitch-dodge serve`:
+
+| Option | |
+| --- | --- |
+| `--port 8080` | use another port (if 8000 is taken) |
+| `--songs ~/Music/some_folder` | also list songs from a folder (repeatable) |
+| `--no-browser` | don't open a tab automatically |
+| `--host 0.0.0.0` | let other devices on your Wi-Fi play at `http://<your-mac>.local:8000` |
+
+The first time a song is played it's analysed (a few seconds); the result is
+cached in `~/.cache/pitch_dodge`, so it's instant after that. High scores are
+saved by the server, so they're shared between browsers and with the desktop
+version.
+
+## Desktop version
+
+The original pygame window still works:
 
 ```bash
-pip install -e .
-pitch-dodge my_song.mp3 --difficulty hard
+.venv/bin/pitch-dodge                        # bundled song
+.venv/bin/pitch-dodge my_song.mp3 -d hard
 ```
-
-The first time you play a song it's analysed (a few seconds); the result is
-cached in `~/.cache/pitch_dodge`, so later runs start instantly.
 
 ## How to play
 
 | Key | Action |
 | --- | --- |
-| ↑ / ↓ or W / S | move the paddle |
-| ← / → on the title screen | choose difficulty |
+| ↑ / ↓ or W / S | move the paddle (on the menu: pick a song) |
+| ← / → on the menu | choose difficulty |
 | Space / Enter | start |
 | P or Esc | pause (R restart, Q back to menu) |
 | M | mute |
 | R on the results screen | play again |
+
+Switching to another tab or window pauses the game.
 
 - Every note that gets past your paddle without touching it scores **10 points**,
   or **15** for a near miss.
@@ -57,13 +83,15 @@ cached in `~/.cache/pitch_dodge`, so later runs start instantly.
 
 ![Title screen](docs/title.png)
 
-## Command-line options
+## Command-line reference
 
 ```
+pitch-dodge serve [--port N] [--host ADDR] [--songs DIR] [--no-browser] [--no-cache]
 pitch-dodge [song] [-d {easy,normal,hard}] [--mute] [--seed N] [--no-cache]
 ```
 
-`--seed` makes note angles repeatable. If no audio device is available the game
+In the desktop version, `--seed` makes note angles repeatable (in the browser,
+add `?seed=N` to the URL). If no audio device is available the desktop game
 runs silently instead of crashing.
 
 ## How it works
@@ -82,14 +110,20 @@ runs silently instead of crashing.
 4. **Drawing** (`pitch_dodge/render.py`) and the **state machine**
    (`pitch_dodge/app.py`): title, playing, paused and results screens.
    Sound effects are synthesised at start-up (`pitch_dodge/sfx.py`).
+5. **Browser version**: `pitch_dodge/server.py` is a small standard-library
+   HTTP server bound to localhost. It serves the page, the song list, uploads,
+   high scores, and each song's analysis as JSON. `pitch_dodge/web/game.js`
+   is a port of the rules and drawing to canvas. Its clock is the Web Audio
+   playback position, so pausing suspends the music and the game together.
+   The rules mirror `world.py`; change both together.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 40 tests, runs headless
+pytest              # runs headless, no audio device needed
 ruff check . && ruff format --check .
 python tools/record_demo.py   # regenerate the GIF and screenshots in docs/
 ```
 
-CI runs lint and tests on Python 3.10, 3.12 and 3.13 for every push.
+CI runs lint and tests on Linux (Python 3.10, 3.12, 3.13) and macOS for every push.
