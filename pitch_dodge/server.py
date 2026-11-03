@@ -43,6 +43,24 @@ STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 
 
 def default_library() -> Path:
+    """The ``songs/`` folder that every song is loaded from and saved to.
+
+    Normally ``songs/`` at the top of the project (next to ``play.sh``), so it's
+    easy to find, add files to, and share. ``PITCH_DODGE_SONGS`` overrides it.
+    If the package was installed somewhere without the project around it, it
+    falls back to ``./songs`` in the current directory.
+    """
+    override = os.environ.get("PITCH_DODGE_SONGS")
+    if override:
+        return Path(override).expanduser()
+    project = PACKAGE_DIR.parent
+    if (project / "pyproject.toml").is_file():
+        return project / "songs"
+    return Path.cwd() / "songs"
+
+
+def legacy_library() -> Path:
+    """Where songs were saved before the project-level ``songs/`` folder existed."""
     base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
     return Path(base) / "pitch_dodge" / "songs"
 
@@ -266,7 +284,11 @@ def serve(
     shown_host = "localhost" if host in ("127.0.0.1", "0.0.0.0", "") else host
     url = f"http://{shown_host}:{server.server_address[1]}/"
     print(f"Pitch Dodge is running at {url}")
-    print(f"Drop songs into {default_library()} or drag them onto the page.")
+    print(f"Songs are loaded from {default_library()}")
+    print("Add more by dropping files in there or dragging them onto the page.")
+    old = legacy_library()
+    if old.is_dir() and any(p.suffix.lower() in AUDIO_EXTENSIONS for p in old.iterdir()):
+        print(f"Note: you have songs in the old folder {old}; move them with `pitch-dodge import-songs`.")
     print("Press Ctrl+C to stop.")
     if open_browser:
         import webbrowser

@@ -320,7 +320,7 @@ def fetch(
         log(f"Nothing suitable found ({skipped_license} items skipped for having no free license).{hint}")
     elif not dry_run:
         log(f"\nSaved {len(written)} new track(s) to {dest}")
-        log(f"Credits are in {credits}. Restart ./play.sh or refresh the page to see them.")
+        log(f"Credits are in {credits}. Refresh the game page to see them.")
     return written
 
 
