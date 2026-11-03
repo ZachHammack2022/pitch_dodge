@@ -22,16 +22,27 @@ cd pitch_dodge
 ./play.sh      # starts the server and opens http://localhost:8000
 ```
 
-Press **Space** to play. To play your own music, drag an mp3 / wav / ogg /
-flac onto the page. It's copied to `~/.local/share/pitch_dodge/songs`, and you
-can also drop files into that folder directly. Stop the server with
-**Ctrl+C**.
+Press **Space** to play. Stop the server with **Ctrl+C**.
+
+### Your songs
+
+Every mp3 / wav / ogg / flac in the project's **`songs/`** folder is loaded
+automatically; refresh the page after adding some. To add songs:
+
+- copy files into `songs/`,
+- drag a file onto the game page,
+- `.venv/bin/pitch-dodge fetch` (see below), or
+- `.venv/bin/pitch-dodge import-songs ~/some/folder` to copy in a whole folder.
+
+Running `.venv/bin/pitch-dodge import-songs` with no folder moves songs from
+the old `~/.local/share/pitch_dodge/songs` location into `songs/`. To keep
+songs somewhere else, set `PITCH_DODGE_SONGS=/path/to/folder`.
 
 ### Getting free music
 
 `pitch-dodge fetch` downloads freely licensed recordings (by default
 [Musopen](https://musopen.org)'s public-domain classical recordings) from the
-[Internet Archive](https://archive.org) straight into your song library:
+[Internet Archive](https://archive.org) straight into `songs/`:
 
 ```bash
 .venv/bin/pitch-dodge fetch                         # 10 tracks
@@ -41,8 +52,8 @@ can also drop files into that folder directly. Stop the server with
 
 It only keeps items labelled public domain or Creative Commons, picks tracks
 between 1 and 8 minutes long (`--min-minutes` / `--max-minutes`), skips files
-you already have, and records each track's source and license in `CREDITS.md`
-in the songs folder. It doesn't use musopen.org itself, which needs an account
+you already have, and records each track's source and license in
+`songs/CREDITS.md`. It doesn't use musopen.org itself, which needs an account
 for downloads and limits how many you can make.
 
 `./play.sh` passes options through to `pitch-dodge serve`:

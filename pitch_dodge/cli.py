@@ -76,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
         from .fetch import main as fetch_main
 
         return fetch_main(argv[1:])
+    if argv and argv[0] == "import-songs":
+        from .importer import main as import_main
+
+        return import_main(argv[1:])
     args = parse_args(argv)
     if not Path(args.song).is_file():
         print(f"pitch-dodge: file not found: {args.song}", file=sys.stderr)
