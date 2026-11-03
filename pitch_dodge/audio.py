@@ -122,3 +122,46 @@ def open_player(path: str, duration: float, mute: bool = False) -> SilentClock:
     except pygame.error as exc:
         print(f"Audio unavailable ({exc}); playing silently.")
         return SilentClock(duration)
+
+
+class CountInClock:
+    """Runs game time from ``-count_in`` up to 0 silently, then starts the music.
+
+    The count-in lets the first notes of a song travel across the screen and
+    land on the very first beats.
+    """
+
+    def __init__(self, player: SilentClock, count_in: float):
+        self.player = player
+        self.count_in = count_in
+        self.audible = player.audible
+        self._lead = SilentClock(count_in)
+        self._music_started = False
+
+    def play(self) -> None:
+        self.player.stop()
+        self._lead.play()
+        self._music_started = False
+
+    def position(self) -> float:
+        if self._music_started:
+            return self.player.position()
+        t = self._lead.position() - self.count_in
+        if t >= 0:
+            self.player.play()
+            self._music_started = True
+            return 0.0
+        return t
+
+    def pause(self) -> None:
+        (self.player if self._music_started else self._lead).pause()
+
+    def resume(self) -> None:
+        (self.player if self._music_started else self._lead).resume()
+
+    def stop(self) -> None:
+        self._lead.stop()
+        self.player.stop()
+
+    def set_volume(self, volume: float) -> None:
+        self.player.set_volume(volume)

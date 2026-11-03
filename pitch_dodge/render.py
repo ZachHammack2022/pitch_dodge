@@ -149,11 +149,11 @@ class Renderer:
 
     # ------------------------------------------------------------ scenes
 
-    def draw_background(self, world: World | None, t: float) -> None:
+    def draw_background(self, world: World | None, song=None, t: float = 0.0) -> None:
         self.screen.blit(self.background, (0, 0))
-        if world is None:
+        if world is None or song is None:
             return
-        energy = world.song.energy_at(t)
+        energy = song.energy_at(t) if t >= 0 else 0.0
         # Faint grid that pulses with loudness.
         grid = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         alpha = int(10 + 30 * energy)
@@ -163,32 +163,35 @@ class Renderer:
             pygame.draw.line(grid, (120, 90, 220, alpha), (0, y), (WIDTH, y))
         self.screen.blit(grid, (0, 0))
 
-        # The melody flowing toward the player: a note fired at time s is now at
-        # x = speed * (t - s), so the curve shows where recent notes came from.
+        # The melody coming toward the player: whatever is at x now will reach
+        # the paddle at song time t + (PADDLE_X - x) / speed.
         speed = world.speed
+        px = world.paddle.x
         pts = []
-        for x in range(0, WIDTH + 1, 8):
-            s = t - x / speed
-            if s < 0:
-                break
-            pts.append((x, pitch_to_y(world.song.pitch_at(s))))
+        for x in range(0, int(px) + 1, 8):
+            s = t + (px - x) / speed
+            if 0 <= s <= world.duration:
+                pts.append((x, pitch_to_y(song.pitch_at(s))))
         if len(pts) > 1:
             pygame.draw.lines(self.screen, (90, 70, 160), False, pts, 2)
 
-        # Emitter: where the next note will come from.
-        y = pitch_to_y(world.song.pitch_at(t))
-        color = pitch_color(world.song.pitch_at(t))
-        g = self._glow(color, 7 + int(5 * energy))
-        self.screen.blit(g, g.get_rect(center=(4, y)))
+        # Emitter: the pitch of what's arriving one travel time from now.
+        ahead = t + world.chart.travel_time
+        if 0 <= ahead <= world.duration:
+            pitch = song.pitch_at(ahead)
+            g = self._glow(pitch_color(pitch), 7 + int(5 * energy))
+            self.screen.blit(g, g.get_rect(center=(4, pitch_to_y(pitch))))
+
+        if t < 0:  # count-in
+            self.text(self.font_big, str(int(-t) + 1), TEXT, center=(WIDTH / 2, HEIGHT / 2), alpha=150)
 
     def draw_world(self, world: World) -> None:
         # Notes, with a short trail.
         for n in world.notes:
             color = pitch_color(n.pitch)
-            speed = math.hypot(n.vx, n.vy) or 1
             for i in range(1, 4):
-                tx = n.x - n.vx / speed * i * n.radius * 0.9
-                ty = n.y - n.vy / speed * i * n.radius * 0.9
+                tx = n.x - i * n.radius * 0.9
+                ty = n.y
                 fade = [int(c * (0.5 - i * 0.12)) for c in color]
                 pygame.draw.circle(self.screen, fade, (int(tx), int(ty)), max(2, int(n.radius - i * 2)))
             g = self._glow(color, int(n.radius))

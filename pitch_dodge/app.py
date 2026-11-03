@@ -8,7 +8,8 @@ from pathlib import Path
 import pygame
 
 from .analysis import SongAnalysis, analyse_file
-from .audio import open_player
+from .audio import CountInClock, open_player
+from .chart import build_chart
 from .render import Renderer
 from .scores import Entry, ScoreBoard
 from .sfx import Sfx
@@ -51,6 +52,7 @@ class App:
         self.world: World | None = None
         self.song: SongAnalysis | None = None
         self.player = None
+        self.song_clock: CountInClock | None = None
         self.sfx: Sfx | None = None
         self.rank: int | None = None
         self.t = 0.0
@@ -75,16 +77,20 @@ class App:
 
     def _start(self) -> None:
         assert self.song is not None and self.player is not None
-        self.world = World(self.song, DIFFICULTIES[self.difficulty], seed=self.seed)
+        difficulty = DIFFICULTIES[self.difficulty]
+        chart = build_chart(self.song, difficulty)
+        self.world = World(chart, difficulty)
         self.renderer.clear_effects()
         self.rank = None
-        self.player.stop()
-        self.player.play()
+        if self.song_clock is not None:
+            self.song_clock.stop()
+        self.song_clock = CountInClock(self.player, chart.count_in)
+        self.song_clock.play()
         self.state = "playing"
 
     def _finish(self) -> None:
         assert self.world is not None
-        self.player.stop()
+        self.song_clock.stop()
         entry = Entry(
             score=self.world.score,
             best_streak=self.world.best_streak,
@@ -121,14 +127,14 @@ class App:
                 self._start()
         elif self.state == "playing":
             if k in (pygame.K_p, pygame.K_ESCAPE):
-                self.player.pause()
+                self.song_clock.pause()
                 self.state = "paused"
         elif self.state == "paused":
             if k in (pygame.K_p, pygame.K_ESCAPE, pygame.K_SPACE):
-                self.player.resume()
+                self.song_clock.resume()
                 self.state = "playing"
             elif k == pygame.K_q:
-                self.player.stop()
+                self.song_clock.stop()
                 self.state = "title"
             elif k == pygame.K_r:
                 self._start()
@@ -157,8 +163,7 @@ class App:
             target = (HEIGHT + 56) / 2
         else:
             n = min(incoming, key=lambda n: p.x - n.x)
-            eta = (p.x - n.x) / max(n.vx, 1)
-            ny = n.y + n.vy * eta
+            ny = n.y
             gap = p.height / 2 + n.radius + 14
             if abs(ny - p.y) > gap:
                 return 0.0
@@ -190,7 +195,7 @@ class App:
     def _update(self, frame_dt: float) -> None:
         if self.state == "playing":
             w = self.world
-            song_time = self.player.position()
+            song_time = self.song_clock.position()
             dt = min(max(song_time - w.song_time, 0.0), MAX_FRAME)
             events = w.update(song_time, dt, self._direction())
             self.renderer.react(events)
@@ -207,7 +212,7 @@ class App:
             r.draw_title(self.song_name, self.difficulty, self.best, self.t)
             return
         w = self.world
-        r.draw_background(w, w.song_time)
+        r.draw_background(w, self.song, w.song_time)
         r.draw_world(w)
         r.draw_hud(w, self.best, self.mute)
         if self.state == "paused":

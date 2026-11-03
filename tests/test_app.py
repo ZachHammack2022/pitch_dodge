@@ -33,7 +33,8 @@ def test_game_loop_runs(song, tmp_path):
     )
     app.run()
     assert app.frames == 90
-    assert app.world is not None and app.world.song_time > 0
+    assert app.world is not None
+    assert app.world.song_time > -app.world.chart.count_in + 0.5  # time advanced through the count-in
 
 
 def test_states_respond_to_keys(song, tmp_path):

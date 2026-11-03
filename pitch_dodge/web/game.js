@@ -16,52 +16,22 @@
   const TOP_MARGIN = 56;
   const SPAWN_MARGIN = 30;
 
-  const DIFFICULTIES = {
-    easy:   { name: 'easy',   lives: 5, baseSpeed: 300, speedGrowth: 0.5, startGap: 0.55, endGap: 0.30, maxGap: 1.2, vySpread: 60,  paddleHeight: 64 },
-    normal: { name: 'normal', lives: 3, baseSpeed: 360, speedGrowth: 0.8, startGap: 0.40, endGap: 0.18, maxGap: 0.9, vySpread: 110, paddleHeight: 72 },
-    hard:   { name: 'hard',   lives: 2, baseSpeed: 420, speedGrowth: 1.1, startGap: 0.28, endGap: 0.10, maxGap: 0.6, vySpread: 170, paddleHeight: 80 },
-  };
   const DIFFICULTY_ORDER = ['easy', 'normal', 'hard'];
 
   const PADDLE_WIDTH = 14;
   const PADDLE_X = WIDTH - 110;
   const PADDLE_SPEED = 560;
   const NOTE_RADIUS = 9;
-  const INVULNERABLE_FOR = 1.2;
+  const INVULNERABLE_FOR = 1.0;
   const NEAR_MISS_DISTANCE = 18;
   const POINTS_DODGE = 10;
   const POINTS_NEAR_MISS = 15;
   const STREAK_PER_LEVEL = 10;
   const MAX_MULTIPLIER = 8;
   const POINTS_PER_LIFE_LEFT = 250;
-  const MAX_STEP = 1 / 120;
   const MAX_FRAME = 1 / 20;
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
-
-  function buildSpawnSchedule(onsets, duration, d, leadIn = 1.0) {
-    if (duration <= 0) return [];
-    const minGap = (t) => d.startGap + (d.endGap - d.startGap) * clamp(t / duration, 0, 1);
-    const times = [];
-    let last = leadIn - d.maxGap;
-    const sorted = Array.from(onsets).sort((a, b) => a - b);
-    for (const t of sorted) {
-      if (t < leadIn || t >= duration) continue;
-      while (t - last > d.maxGap) {
-        last += d.maxGap;
-        if (last >= leadIn) times.push(last);
-      }
-      if (t - last >= minGap(t)) {
-        times.push(t);
-        last = t;
-      }
-    }
-    while (duration - last > d.maxGap) {
-      last += d.maxGap;
-      if (last < duration) times.push(last);
-    }
-    return times;
-  }
 
   function pitchToY(pitch) {
     const top = TOP_MARGIN + SPAWN_MARGIN;
@@ -69,88 +39,86 @@
     return bottom - clamp(pitch, 0, 1) * (bottom - top);
   }
 
-  function mulberry32(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a = (a + 0x6d2b79f5) >>> 0;
-      let t = a;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
   class Song {
     constructor(data) {
       this.pitch = Float32Array.from(data.pitch);
       this.energy = Float32Array.from(data.energy);
-      this.onsets = data.onsets;
       this.hop = data.hop_seconds;
       this.duration = data.duration;
+      this.charts = data.charts;
     }
     frame(t) { return clamp(Math.floor(t / this.hop), 0, this.pitch.length - 1); }
     pitchAt(t) { return this.pitch[this.frame(t)]; }
-    energyAt(t) { return this.energy[this.frame(t)]; }
+    energyAt(t) { return t < 0 ? 0 : this.energy[this.frame(t)]; }
   }
 
+  /**
+   * Plays a chart from the server (see chart.py). A note's position comes
+   * straight from song time, x = PADDLE_X - (arrival - now) * speed, so it
+   * crosses the paddle exactly on its beat whatever the frame rate.
+   */
   class World {
-    constructor(song, difficulty, seed) {
+    constructor(song, chart) {
       this.song = song;
-      this.d = difficulty;
-      this.rand = mulberry32(seed == null ? (Math.random() * 2 ** 32) : seed);
+      this.chart = chart;
       this.notes = [];
       this.score = 0;
       this.streak = 0;
       this.bestStreak = 0;
       this.dodged = 0;
       this.hits = 0;
-      this.songTime = 0;
-      this.invulnerableUntil = -1;
+      this.songTime = -chart.count_in;
+      this.invulnerableUntil = -1e9;
       this.over = false;
       this.cleared = false;
-      this.lives = difficulty.lives;
-      this.paddle = { x: PADDLE_X, y: (TOP_MARGIN + HEIGHT) / 2, width: PADDLE_WIDTH, height: difficulty.paddleHeight };
-      this.schedule = buildSpawnSchedule(song.onsets, song.duration, difficulty);
-      this.nextSpawn = 0;
+      this.maxLives = chart.lives;
+      this.lives = chart.lives;
+      this.paddle = { x: PADDLE_X, y: (TOP_MARGIN + HEIGHT) / 2, width: PADDLE_WIDTH, height: chart.paddle_height };
+      this.next = 0;
     }
 
-    get progress() { return this.song.duration <= 0 ? 1 : clamp(this.songTime / this.song.duration, 0, 1); }
+    get duration() { return this.chart.duration; }
+    get progress() { return this.duration <= 0 ? 1 : clamp(this.songTime / this.duration, 0, 1); }
     get multiplier() { return Math.min(1 + Math.floor(this.streak / STREAK_PER_LEVEL), MAX_MULTIPLIER); }
     get invulnerable() { return this.songTime < this.invulnerableUntil; }
-    get speed() { return this.d.baseSpeed * (1 + this.d.speedGrowth * this.progress); }
+    get speed() { return this.chart.speed; }
+
+    xAt(noteT, now) { return PADDLE_X - (noteT - now) * this.chart.speed; }
 
     movePaddle(direction, dt) {
       const p = this.paddle;
       p.y = clamp(p.y + direction * PADDLE_SPEED * dt, TOP_MARGIN + p.height / 2, HEIGHT - p.height / 2);
     }
 
-    gapTo(note) {
+    gapY(note) {
       const p = this.paddle;
-      const cx = clamp(note.x, p.x, p.x + p.width);
-      const cy = clamp(note.y, p.y - p.height / 2, p.y + p.height / 2);
-      return Math.hypot(note.x - cx, note.y - cy) - note.radius;
+      return Math.max(p.y - p.height / 2 - note.y, note.y - (p.y + p.height / 2), 0) - note.radius;
     }
 
     update(songTime, dt, direction) {
       const events = [];
       if (this.over || this.cleared) return events;
+      const prev = this.songTime;
       this.songTime = songTime;
       this.movePaddle(direction, dt);
 
-      while (this.nextSpawn < this.schedule.length && this.schedule[this.nextSpawn] <= songTime) {
-        this.spawn(this.schedule[this.nextSpawn++], events);
+      const notes = this.chart.notes;
+      while (this.next < notes.length && notes[this.next].t - this.chart.travel_time <= songTime) {
+        const c = notes[this.next++];
+        const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength,
+                    radius: NOTE_RADIUS * (0.85 + 0.4 * c.strength), x: -NOTE_RADIUS,
+                    passed: false, hit: false, ghosted: false, closestGap: Infinity };
+        this.notes.push(n);
+        events.push({ kind: 'spawn', x: 0, y: n.y });
       }
 
-      const steps = Math.max(1, Math.ceil(dt / MAX_STEP));
-      for (let s = 0; s < steps; s++) {
-        for (const n of this.notes) {
-          this.step(n, dt / steps, events);
-          if (this.over) return events;
-        }
+      for (const n of this.notes) {
+        this.step(n, prev, songTime, events);
+        if (this.over) return events;
       }
       this.notes = this.notes.filter((n) => !n.hit && n.x - n.radius < WIDTH);
 
-      if (songTime >= this.song.duration && this.nextSpawn >= this.schedule.length && this.notes.length === 0) {
+      if (songTime >= this.duration && this.next >= notes.length && this.notes.length === 0) {
         this.cleared = true;
         const bonus = this.lives * POINTS_PER_LIFE_LEFT;
         this.score += bonus;
@@ -159,43 +127,19 @@
       return events;
     }
 
-    spawn(t, events) {
-      const pitch = this.song.pitchAt(t);
-      const y = pitchToY(pitch);
-      const speed = this.speed * (0.85 + this.rand() * 0.3);
-      const vy = (this.rand() * 2 - 1) * this.d.vySpread * (0.5 + this.progress);
-      this.notes.push({ x: -NOTE_RADIUS, y, vx: speed, vy, pitch, radius: NOTE_RADIUS,
-                        passed: false, hit: false, ghosted: false, closestGap: Infinity });
-      events.push({ kind: 'spawn', x: 0, y });
-    }
-
-    step(n, dt, events) {
-      n.x += n.vx * dt;
-      n.y += n.vy * dt;
-      const top = TOP_MARGIN + n.radius;
-      const bottom = HEIGHT - n.radius;
-      if (n.y < top) { n.y = 2 * top - n.y; n.vy = Math.abs(n.vy); }
-      else if (n.y > bottom) { n.y = 2 * bottom - n.y; n.vy = -Math.abs(n.vy); }
+    step(n, prev, now, events) {
+      const xPrev = this.xAt(n.t, prev);
+      n.x = this.xAt(n.t, now);
       if (n.passed) return;
-
-      const gap = this.gapTo(n);
-      if (gap < 0 && this.invulnerable) {
-        n.ghosted = true;
-      } else if (gap < 0) {
-        n.hit = n.passed = true;
-        this.hits++;
-        this.lives--;
-        this.streak = 0;
-        this.invulnerableUntil = this.songTime + INVULNERABLE_FOR;
-        events.push({ kind: 'hit', x: n.x, y: n.y, value: this.lives });
-        if (this.lives <= 0) {
-          this.over = true;
-          events.push({ kind: 'game_over', value: this.score });
-        }
-        return;
+      const p = this.paddle;
+      const crossing = xPrev - n.radius <= p.x + p.width && n.x + n.radius >= p.x;
+      const gap = this.gapY(n);
+      if (crossing) {
+        n.closestGap = Math.min(n.closestGap, gap);
+        if (gap < 0 && this.invulnerable) n.ghosted = true;
+        else if (gap < 0) { this.hit(n, events); return; }
       }
-
-      if (n.x - n.radius > this.paddle.x + this.paddle.width) {
+      if (n.x - n.radius > p.x + p.width) {
         n.passed = true;
         if (n.ghosted) return;
         const oldLevel = this.multiplier;
@@ -207,9 +151,20 @@
         this.score += points;
         events.push({ kind: near ? 'near_miss' : 'dodge', x: n.x, y: n.y, value: points });
         if (this.multiplier > oldLevel) events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier });
-        return;
       }
-      n.closestGap = Math.min(n.closestGap, gap);
+    }
+
+    hit(n, events) {
+      n.hit = n.passed = true;
+      this.hits++;
+      this.lives--;
+      this.streak = 0;
+      this.invulnerableUntil = this.songTime + INVULNERABLE_FOR;
+      events.push({ kind: 'hit', x: n.x, y: n.y, value: this.lives });
+      if (this.lives <= 0) {
+        this.over = true;
+        events.push({ kind: 'game_over', value: this.score });
+      }
     }
   }
 
@@ -242,14 +197,15 @@
       this.buffer = await new Promise((resolve, reject) => ctx.decodeAudioData(arrayBuffer, resolve, reject));
     }
 
-    async play() {
+    /** Start the song ``countIn`` seconds from now; position() is negative until then. */
+    async play(countIn = 0) {
       const ctx = this.ensure();
       this.stop();
       if (ctx.state === 'suspended') await ctx.resume();
       this.source = ctx.createBufferSource();
       this.source.buffer = this.buffer;
       this.source.connect(this.musicGain);
-      this.startedAt = ctx.currentTime + 0.05;
+      this.startedAt = ctx.currentTime + Math.max(0.05, countIn);
       this.source.start(this.startedAt);
     }
 
@@ -268,7 +224,7 @@
     position() {
       if (!this.ctx || !this.source) return 0;
       const latency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
-      return Math.max(0, this.ctx.currentTime - this.startedAt - latency);
+      return this.ctx.currentTime - this.startedAt - latency;
     }
 
     setMuted(m) {
@@ -456,31 +412,34 @@
       for (let y = TOP_MARGIN; y < HEIGHT; y += 48) { c.moveTo(0, y + 0.5); c.lineTo(WIDTH, y + 0.5); }
       c.stroke();
 
-      // The recent melody: a note fired at time s is now at x = speed * (t - s).
+      // The melody coming toward the player: whatever is at x now reaches the
+      // paddle at song time t + (PADDLE_X - x) / speed.
       c.strokeStyle = '#5a46a0';
       c.lineWidth = 2;
       c.beginPath();
       let started = false;
-      for (let x = 0; x <= WIDTH; x += 8) {
-        const s = t - x / w.speed;
-        if (s < 0) break;
+      for (let x = 0; x <= PADDLE_X; x += 8) {
+        const s = t + (PADDLE_X - x) / w.speed;
+        if (s < 0 || s > w.duration) { started = false; continue; }
         const y = pitchToY(w.song.pitchAt(s));
         started ? c.lineTo(x, y) : c.moveTo(x, y);
         started = true;
       }
       c.stroke();
-      this.blitGlow(pitchColor(w.song.pitchAt(t)), 7 + Math.round(5 * energy), 4, pitchToY(w.song.pitchAt(t)));
+      const ahead = t + w.chart.travel_time;
+      if (ahead >= 0 && ahead <= w.duration) {
+        const pitch = w.song.pitchAt(ahead);
+        this.blitGlow(pitchColor(pitch), 7 + Math.round(5 * energy), 4, pitchToY(pitch));
+      }
 
       // Notes with trails.
       for (const n of w.notes) {
         const color = pitchColor(n.pitch);
-        const sp = Math.hypot(n.vx, n.vy) || 1;
         for (let i = 3; i >= 1; i--) {
           c.globalAlpha = 0.5 - i * 0.12;
           c.fillStyle = color;
           c.beginPath();
-          c.arc(n.x - (n.vx / sp) * i * n.radius * 0.9, n.y - (n.vy / sp) * i * n.radius * 0.9,
-                Math.max(2, n.radius - i * 2), 0, Math.PI * 2);
+          c.arc(n.x - i * n.radius * 0.9, n.y, Math.max(2, n.radius - i * 2), 0, Math.PI * 2);
           c.fill();
         }
         c.globalAlpha = 1;
@@ -517,6 +476,15 @@
       c.globalAlpha = 1;
       c.restore();
 
+      if (t < 0) {  // count-in
+        c.font = '800 96px -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif';
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        c.fillStyle = 'rgba(235, 235, 245, 0.55)';
+        c.fillText(String(Math.floor(-t) + 1), WIDTH / 2, HEIGHT / 2);
+        c.textAlign = 'left';
+      }
+
       if (this.flash > 0) {
         c.fillStyle = `rgba(255, 40, 60, ${0.47 * this.flash / 0.25})`;
         c.fillRect(0, 0, WIDTH, HEIGHT);
@@ -544,7 +512,7 @@
       if (best) c.fillText(`best ${best.toLocaleString()}`, 340, 28);
       if (muted) c.fillText('muted', 450, 28);
 
-      for (let i = 0; i < w.d.lives; i++) {
+      for (let i = 0; i < w.maxLives; i++) {
         const cx = WIDTH - 24 - i * 26;
         c.beginPath();
         c.moveTo(cx, 18); c.lineTo(cx + 9, 28); c.lineTo(cx, 38); c.lineTo(cx - 9, 28); c.closePath();
@@ -594,7 +562,6 @@
     keys: new Set(),
     t: 0,
     lastFrame: performance.now(),
-    seed: params.has('seed') ? Number(params.get('seed')) : null,
     autoplay: params.has('autoplay'),
   };
   const audio = new Audio();
@@ -728,9 +695,9 @@
       setStatus(`Couldn't load ${sel.name}: ${e.message}`, true);
       return;
     }
-    state.world = new World(state.loaded.song, DIFFICULTIES[state.difficulty], state.seed);
+    state.world = new World(state.loaded.song, state.loaded.song.charts[state.difficulty]);
     renderer.clearEffects();
-    await audio.play();
+    await audio.play(state.world.chart.count_in);
     show('playing');
   }
 
@@ -810,7 +777,7 @@
     let target = mid;
     if (incoming.length) {
       const n = incoming.reduce((a, b) => (p.x - a.x < p.x - b.x ? a : b));
-      const ny = n.y + n.vy * ((p.x - n.x) / Math.max(n.vx, 1));
+      const ny = n.y;
       const gap = p.height / 2 + n.radius + 14;
       if (Math.abs(ny - p.y) > gap) return 0;
       target = ny < mid ? ny + gap : ny - gap;
@@ -916,7 +883,7 @@
   }
 
   // Exposed for tests and the curious.
-  window.PitchDodge = { state, World, Song, buildSpawnSchedule, DIFFICULTIES };
+  window.PitchDodge = { state, World, Song };
 
   audio.setMuted(!!localStorageGet('muted'));
   renderDifficulty();
