@@ -210,3 +210,13 @@ def test_charts_include_holds_and_hazards_avoid_them():
         for n in holds:
             if n.t <= h.t <= n.t + n.duration:
                 assert abs(h.pitch - n.pitch) >= 0.3
+
+
+def test_note_takes_the_pitch_just_after_its_onset():
+    # The melody jumps from low to high exactly at a beat; the smoothed curve
+    # still says "low" on that frame, so the note must look slightly ahead.
+    song = make_song(duration=10, beats=BEATS_120, pitch=lambda t: 0.2 if t < 4.0 else 0.8)
+    chart = build_chart(song, DIFFICULTIES["easy"])
+    on_jump = next(n for n in chart.notes if abs(n.t - 4.0) < 1e-6)
+    assert on_jump.pitch > 0.6  # heading for the new pitch (a jump this big is squashed a little)
+    assert all(n.pitch == pytest.approx(0.8) for n in chart.notes if n.t > 5)

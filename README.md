@@ -162,8 +162,10 @@ crashing. Add `?autoplay` to the browser URL to watch a bot play.
    HTTP server bound to localhost. It serves the page, the song list, uploads,
    high scores, and each song's charts as JSON. `pitch_dodge/web/game.js`
    plays the charts on a canvas. Its clock is the Web Audio playback position,
-   so pausing suspends the music and the game together. Its rules mirror
-   `world.py`; change both together.
+   so pausing suspends the music and the game together. The browser's rules
+   live in `pitch_dodge/web/rules.js`, a mirror of `world.py`;
+   `tests/test_js_parity.py` plays the same chart through both (with Node)
+   and fails if they disagree on anything.
 
 ## Development
 

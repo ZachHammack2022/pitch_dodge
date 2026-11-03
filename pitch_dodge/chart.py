@@ -33,6 +33,10 @@ LEVEL_MIN_INTENSITY = {0: 0.0, 1: 0.35, 2: 0.6}
 HAZARD_MIN_INTENSITY = 0.25
 
 # Hold notes: when the melody sustains one pitch with nothing else to catch.
+# Read a note's pitch this long after its onset: right at the onset the smoothed
+# pitch curve still holds the previous note.
+PITCH_LOOKAHEAD = 0.07  # seconds
+
 HOLD_MIN_GAP = 0.8  # a note needs this much room before the next catch note to become a hold
 HOLD_RELEASE = 0.3  # seconds between a hold's end and the next note
 HOLD_MIN = 0.5  # shorter sustains stay ordinary notes
@@ -213,6 +217,10 @@ def _fill_gaps(
 # ---------------------------------------------------------------- chart
 
 
+def note_pitch(song: SongAnalysis, t: float) -> float:
+    return song.pitch_at(t + PITCH_LOOKAHEAD)
+
+
 def find_holds(song: SongAnalysis, times: list[float]) -> list[float]:
     """Hold duration for each catch note (0 = not a hold).
 
@@ -226,9 +234,9 @@ def find_holds(song: SongAnalysis, times: list[float]) -> list[float]:
             out.append(0.0)
             continue
         limit = min(room - HOLD_RELEASE, HOLD_MAX)
-        p0, e0 = song.pitch_at(t), song.energy_at(t)
+        p0, e0 = note_pitch(song, t), song.energy_at(t)
         floor = max(HOLD_MIN_ENERGY, HOLD_ENERGY_DROP * e0)
-        end = t
+        end = t + PITCH_LOOKAHEAD
         step = song.hop_seconds
         while end + step <= t + limit:
             nxt = end + step
@@ -285,7 +293,7 @@ def build_chart(song: SongAnalysis, difficulty: Difficulty) -> Chart:
     holds = find_holds(song, catch_times)
     catch_pitches = make_reachable(
         catch_times,
-        [song.pitch_at(t) for t in catch_times],
+        [note_pitch(song, t) for t in catch_times],
         difficulty.paddle_height,
         departures=[t + d for t, d in zip(catch_times, holds, strict=True)],
     )

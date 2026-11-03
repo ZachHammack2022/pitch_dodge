@@ -30,6 +30,7 @@ jobs:
         run: |
           ruff check .
           ruff format --check .
+          node --check pitch_dodge/web/rules.js
           node --check pitch_dodge/web/game.js
           bash -n setup.sh play.sh
       - name: Test
