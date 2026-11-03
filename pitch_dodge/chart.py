@@ -32,6 +32,15 @@ INTENSITY_WINDOW = 4.0  # seconds
 LEVEL_MIN_INTENSITY = {0: 0.0, 1: 0.35, 2: 0.6}
 HAZARD_MIN_INTENSITY = 0.25
 
+# Hold notes: when the melody sustains one pitch with nothing else to catch.
+HOLD_MIN_GAP = 0.8  # a note needs this much room before the next catch note to become a hold
+HOLD_RELEASE = 0.3  # seconds between a hold's end and the next note
+HOLD_MIN = 0.5  # shorter sustains stay ordinary notes
+HOLD_MAX = 3.0
+HOLD_PITCH_TOLERANCE = 0.06  # the sustain ends when the pitch drifts this far (0..1 scale)
+HOLD_MIN_ENERGY = 0.12  # ...or when it gets this quiet
+HOLD_ENERGY_DROP = 0.4  # ...or drops below this fraction of its starting loudness
+
 
 @dataclass(frozen=True)
 class ChartNote:
@@ -41,6 +50,7 @@ class ChartNote:
     strength: float = 0.5  # 0..1, how hard the music hits here
     level: int = 0  # 0 = on the beat, 1 = half beat, 2 = quarter beat
     midi: int = 72  # note to play when this is handled well: the song's pitch class here, octave 5
+    duration: float = 0.0  # > 0 for a hold note: keep the paddle on its tail this long after the head
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,7 @@ class Chart:
                     "t": round(n.t, 4),
                     "pitch": round(n.pitch, 3),
                     "strength": round(n.strength, 3),
+                    "duration": round(n.duration, 3),
                 }
                 for n in self.notes
             ],
@@ -202,16 +213,51 @@ def _fill_gaps(
 # ---------------------------------------------------------------- chart
 
 
-def make_reachable(times: list[float], pitches: list[float], paddle_height: float) -> list[float]:
+def find_holds(song: SongAnalysis, times: list[float]) -> list[float]:
+    """Hold duration for each catch note (0 = not a hold).
+
+    A note becomes a hold when there's room before the next one and the song
+    really sustains there: the pitch stays put and the sound doesn't die away.
+    """
+    out = []
+    for i, t in enumerate(times):
+        room = (times[i + 1] if i + 1 < len(times) else song.duration) - t
+        if room < HOLD_MIN_GAP:
+            out.append(0.0)
+            continue
+        limit = min(room - HOLD_RELEASE, HOLD_MAX)
+        p0, e0 = song.pitch_at(t), song.energy_at(t)
+        floor = max(HOLD_MIN_ENERGY, HOLD_ENERGY_DROP * e0)
+        end = t
+        step = song.hop_seconds
+        while end + step <= t + limit:
+            nxt = end + step
+            if abs(song.pitch_at(nxt) - p0) > HOLD_PITCH_TOLERANCE or song.energy_at(nxt) < floor:
+                break
+            end = nxt
+        d = end - t
+        out.append(round(d, 3) if d >= HOLD_MIN else 0.0)
+    return out
+
+
+def make_reachable(
+    times: list[float],
+    pitches: list[float],
+    paddle_height: float,
+    departures: list[float] | None = None,
+) -> list[float]:
     """Squash melody jumps the paddle couldn't make in time, keeping the contour.
 
     Between two catch notes the paddle may move at most ~70% of its top speed
     (plus a little slack from its own height); bigger jumps are shortened.
+    ``departures`` are when the paddle can leave each note (a hold's end);
+    by default, the note's own time.
     """
     span = (HEIGHT - SPAWN_MARGIN) - (TOP_MARGIN + SPAWN_MARGIN)
+    departures = departures or times
     out = list(pitches[:1])
     for i in range(1, len(pitches)):
-        dt = times[i] - times[i - 1]
+        dt = max(times[i] - departures[i - 1], 0.0)
         max_step = (PADDLE_SPEED * 0.7 * dt + paddle_height * 0.35) / span
         out.append(float(np.clip(pitches[i], out[-1] - max_step, out[-1] + max_step)))
     return out
@@ -236,9 +282,21 @@ def build_chart(song: SongAnalysis, difficulty: Difficulty) -> Chart:
     catch = [c for c in _candidates(song, difficulty, "harmonic") if FIRST_NOTE_AT <= c[0] <= last]
     catch = _fill_gaps(_thin(catch, difficulty.min_gap), grid_beats, last, difficulty.max_gap)
     catch_times = [t for t, _, _ in catch]
+    holds = find_holds(song, catch_times)
     catch_pitches = make_reachable(
-        catch_times, [song.pitch_at(t) for t in catch_times], difficulty.paddle_height
+        catch_times,
+        [song.pitch_at(t) for t in catch_times],
+        difficulty.paddle_height,
+        departures=[t + d for t, d in zip(catch_times, holds, strict=True)],
     )
+    # The melody path, including where the paddle sits during holds.
+    path_times, path_pitches = [], []
+    for t, p, d in zip(catch_times, catch_pitches, holds, strict=True):
+        path_times.append(t)
+        path_pitches.append(p)
+        if d > 0:
+            path_times.append(t + d)
+            path_pitches.append(p)
 
     hazards = [
         c
@@ -246,7 +304,7 @@ def build_chart(song: SongAnalysis, difficulty: Difficulty) -> Chart:
         if FIRST_NOTE_AT + 1.0 <= c[0] <= last
     ]
     hazards = _thin(hazards, difficulty.hazard_min_gap)
-    hazard_pitches = place_hazards([t for t, _, _ in hazards], catch_times, catch_pitches)
+    hazard_pitches = place_hazards([t for t, _, _ in hazards], path_times, path_pitches)
 
     notes = [
         ChartNote(
@@ -256,8 +314,9 @@ def build_chart(song: SongAnalysis, difficulty: Difficulty) -> Chart:
             strength=float(np.clip(s, 0, 1)),
             level=level,
             midi=72 + song.pitch_class_at(t),
+            duration=d,
         )
-        for (t, level, s), p in zip(catch, catch_pitches, strict=True)
+        for (t, level, s), p, d in zip(catch, catch_pitches, holds, strict=True)
     ] + [
         ChartNote(t=t, pitch=p, kind="hazard", strength=float(np.clip(s, 0, 1)), level=level)
         for (t, level, s), p in zip(hazards, hazard_pitches, strict=True)

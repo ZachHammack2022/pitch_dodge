@@ -60,7 +60,8 @@ def test_serves_the_game(server):
 
 def test_lists_bundled_song(server):
     songs = json.loads(get(server + "/api/songs")[2])["songs"]
-    assert {"file": "jungle_waves.mp3", "name": "jungle waves", "bundled": True} in songs
+    bundled = next(s for s in songs if s["file"] == "jungle_waves.mp3")
+    assert bundled["name"] == "jungle waves" and bundled["bundled"] is True
 
 
 def test_audio_endpoint(server):
@@ -126,3 +127,59 @@ def test_scores_roundtrip(server):
 )
 def test_safe_filename(name, expected):
     assert safe_filename(name) == expected
+
+
+def test_status_and_background_analysis(tmp_path, monkeypatch):
+    import time
+
+    from pitch_dodge.server import SongLibrary
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    lib = tmp_path / "library"
+    lib.mkdir()
+    (lib / "tone.wav").write_bytes(wav_bytes(tmp_path))
+    srv = make_server(port=0, library_dir=lib, scores=ScoreBoard(tmp_path / "s.json"), background=True)
+    library = srv.RequestHandlerClass.library
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        # The bundled song is long, so check our short one: queued/analysing, then ready.
+        deadline = time.time() + 120
+        seen = set()
+        while time.time() < deadline:
+            st = json.loads(get(base + "/api/songs/tone.wav/status")[2])
+            seen.add(st["state"])
+            if st["state"] == "ready":
+                break
+            time.sleep(0.05)
+        assert st == {"state": "ready", "progress": 1.0}
+        songs = json.loads(get(base + "/api/songs")[2])["songs"]
+        assert next(s for s in songs if s["file"] == "tone.wav")["status"] == "ready"
+        assert isinstance(library, SongLibrary)
+        assert status_of(get, base + "/api/songs/nope.wav/status") == 404
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_progress_is_reported_during_analysis(tmp_path, monkeypatch):
+    from pitch_dodge.server import SongLibrary
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    lib = tmp_path / "library"
+    lib.mkdir()
+    (lib / "tone.wav").write_bytes(wav_bytes(tmp_path))
+    library = SongLibrary(lib)
+    seen = []
+    orig = library._set
+
+    def spy(filename, **st):
+        if "progress" in st:
+            seen.append(st["progress"])
+        orig(filename, **st)
+
+    library._set = spy
+    library.analyse(lib / "tone.wav")
+    assert seen == sorted(seen) and seen[0] == 0.0 and seen[-1] == 1.0 and len(seen) > 4
+    assert library.status("tone.wav")["state"] == "ready"

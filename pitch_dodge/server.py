@@ -1,16 +1,18 @@
 """Serve the browser version of the game on localhost.
 
 The browser can't run librosa, so the server does the audio analysis and hands
-the game a small JSON description of each song (pitch curve, onsets, loudness)
-plus the audio file itself. Everything else, drawing, input, playback and
-rules, happens in the page (``pitch_dodge/web``).
+the game a small JSON description of each song (pitch curve, loudness and a
+chart per difficulty) plus the audio file itself. On start-up it analyses any
+songs that aren't cached yet in the background, so they're ready to play.
+Everything else (drawing, input, playback and rules) happens in the page (``pitch_dodge/web``).
 
 Endpoints:
 
     GET  /                          the game
     GET  /api/songs                 songs in the bundled and library folders
     POST /api/songs                 upload a song (raw body, X-Filename header)
-    GET  /api/songs/<file>/analysis pitch / energy / onsets as JSON
+    GET  /api/songs/<file>/analysis pitch, energy and the charts as JSON
+    GET  /api/songs/<file>/status   {"state": ready|analysing|queued|new|error, "progress": 0..1}
     GET  /api/songs/<file>/audio    the audio file
     GET  /api/scores?song=&difficulty=
     POST /api/scores                {song, difficulty, score, best_streak, cleared}
@@ -22,6 +24,7 @@ import datetime as dt
 import json
 import mimetypes
 import os
+import queue
 import re
 import threading
 from dataclasses import asdict
@@ -30,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .analysis import analyse_file
+from .analysis import analyse_file, is_cached
 from .chart import build_chart
 from .scores import Entry, ScoreBoard
 from .world import DIFFICULTIES
@@ -89,6 +92,65 @@ class SongLibrary:
         self.library_dir = library_dir
         self.dirs = [*(extra_dirs or []), library_dir, BUNDLED_SONGS]
         self._analysis_lock = threading.Lock()
+        self._status_lock = threading.Lock()
+        self._status: dict[str, dict] = {}  # file -> {"state", "progress", "error"?}
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._worker: threading.Thread | None = None
+
+    # ------------------------------------------------ status / background
+
+    def status(self, filename: str) -> dict:
+        """{"state": "ready" | "analysing" | "queued" | "new" | "error", "progress": 0..1}."""
+        with self._status_lock:
+            st = self._status.get(filename)
+            if st is not None and st["state"] != "new":
+                return dict(st)
+        path = self.find(filename)
+        ready = path is not None and is_cached(path)
+        st = {"state": "ready", "progress": 1.0} if ready else {"state": "new", "progress": 0.0}
+        with self._status_lock:
+            self._status.setdefault(filename, st)
+            return dict(self._status[filename])
+
+    def _set(self, filename: str, **st) -> None:
+        with self._status_lock:
+            self._status[filename] = {**self._status.get(filename, {}), **st}
+
+    def start_background(self) -> None:
+        """Analyse every song that isn't cached yet, one at a time, in a daemon thread."""
+        if self._worker is None:
+            self._worker = threading.Thread(target=self._work, name="analysis", daemon=True)
+            self._worker.start()
+        for s in self.songs():
+            self.enqueue(s["file"])
+
+    def enqueue(self, filename: str) -> None:
+        if self.status(filename)["state"] in ("new", "error"):
+            self._set(filename, state="queued", progress=0.0)
+            self._queue.put(filename)
+
+    def _work(self) -> None:
+        while True:
+            filename = self._queue.get()
+            path = self.find(filename)
+            if path is None or self.status(filename)["state"] == "ready":
+                continue
+            try:
+                self.analyse(path)
+            except Exception:  # noqa: BLE001  (recorded in the status; the worker keeps going)
+                pass
+
+    def analyse(self, path: Path):
+        """Analyse (or load from cache) one song, recording progress for /status."""
+        with self._analysis_lock:  # one at a time; the cache makes repeats instant
+            self._set(path.name, state="analysing", progress=0.0)
+            try:
+                song = analyse_file(path, progress=lambda f: self._set(path.name, progress=round(f, 3)))
+            except Exception as exc:
+                self._set(path.name, state="error", progress=0.0, error=str(exc))
+                raise
+            self._set(path.name, state="ready", progress=1.0)
+            return song
 
     def songs(self) -> list[dict]:
         seen: dict[str, dict] = {}
@@ -101,6 +163,7 @@ class SongLibrary:
                         "file": p.name,
                         "name": display_name(p.name),
                         "bundled": d == BUNDLED_SONGS,
+                        "status": self.status(p.name)["state"] if self._worker else None,
                     }
         return sorted(seen.values(), key=lambda s: s["name"].lower())
 
@@ -114,8 +177,7 @@ class SongLibrary:
         return None
 
     def analysis(self, path: Path) -> dict:
-        with self._analysis_lock:  # one at a time; the cache makes repeats instant
-            song = analyse_file(path)
+        song = self.analyse(path)
         return {
             "pitch": [round(float(v), 3) for v in song.pitch],
             "energy": [round(float(v), 3) for v in song.energy],
@@ -141,6 +203,8 @@ class SongLibrary:
             target = self.library_dir / f"{stem}_{n}{ext}"
             n += 1
         target.write_bytes(data)
+        if self._worker is not None:
+            self.enqueue(target.name)
         return target.name
 
 
@@ -149,6 +213,7 @@ def make_handler(library: SongLibrary, scores: ScoreBoard):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "PitchDodge"
+        library = None  # set below, for tests and introspection
 
         def log_message(self, fmt, *args):  # quieter than the default
             if os.environ.get("PITCH_DODGE_VERBOSE"):
@@ -193,6 +258,10 @@ def make_handler(library: SongLibrary, scores: ScoreBoard):
                 return self._static("/".join(parts))
             if parts == ["api", "songs"]:
                 return self._json({"songs": library.songs()})
+            if len(parts) == 4 and parts[:2] == ["api", "songs"] and parts[3] == "status":
+                if library.find(parts[2]) is None:
+                    return self._error(HTTPStatus.NOT_FOUND, "No such song")
+                return self._json(library.status(parts[2]))
             if len(parts) == 4 and parts[:2] == ["api", "songs"] and parts[3] in ("analysis", "audio"):
                 path = library.find(parts[2])
                 if path is None:
@@ -258,6 +327,7 @@ def make_handler(library: SongLibrary, scores: ScoreBoard):
             ctype = STATIC_TYPES.get(target.suffix, "application/octet-stream")
             self._send(200, target.read_bytes(), f"{ctype}; charset=utf-8")
 
+    Handler.library = library
     return Handler
 
 
@@ -267,8 +337,11 @@ def make_server(
     library_dir: Path | None = None,
     extra_dirs: list[Path] | None = None,
     scores: ScoreBoard | None = None,
+    background: bool = False,
 ) -> ThreadingHTTPServer:
     library = SongLibrary(library_dir or default_library(), extra_dirs)
+    if background:
+        library.start_background()
     server = ThreadingHTTPServer((host, port), make_handler(library, scores or ScoreBoard()))
     server.daemon_threads = True
     return server
@@ -281,7 +354,7 @@ def serve(
     extra_dirs: list[Path] | None = None,
 ) -> None:
     try:
-        server = make_server(host, port, extra_dirs=extra_dirs)
+        server = make_server(host, port, extra_dirs=extra_dirs, background=True)
     except OSError as exc:
         msg = f"pitch-dodge: can't listen on {host}:{port} ({exc}). Try --port {port + 1}."
         raise SystemExit(msg) from exc

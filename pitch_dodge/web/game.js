@@ -21,6 +21,7 @@
   const PADDLE_WIDTH = 14;
   const PADDLE_X = WIDTH - 110;
   const PADDLE_SPEED = 560;
+  const POINTER_SPEED = 1500; // cap when following the mouse / trackpad / touch
   const NOTE_RADIUS = 9;
   const INVULNERABLE_FOR = 1.0;
   const POINTS_CATCH = 10;
@@ -29,6 +30,8 @@
   const STREAK_PER_LEVEL = 10;
   const MAX_MULTIPLIER = 8;
   const POINTS_PER_LIFE_LEFT = 250;
+  const POINTS_HOLD_PER_SECOND = 20;
+  const POINTS_HOLD_BONUS = 10;
   const MAX_FRAME = 1 / 20;
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -69,6 +72,8 @@
       this.perfect = 0;
       this.missed = 0;
       this.hits = 0; // hazards that hit
+      this.holds = 0;
+      this.holdsCompleted = 0;
       this.songTime = -chart.count_in;
       this.invulnerableUntil = -1e9;
       this.over = false;
@@ -88,9 +93,12 @@
 
     xAt(noteT, now) { return PADDLE_X - (noteT - now) * this.chart.speed; }
 
-    movePaddle(direction, dt) {
+    movePaddle(direction, dt, targetY) {
       const p = this.paddle;
-      p.y = clamp(p.y + direction * PADDLE_SPEED * dt, TOP_MARGIN + p.height / 2, HEIGHT - p.height / 2);
+      const y = targetY == null
+        ? p.y + direction * PADDLE_SPEED * dt
+        : p.y + clamp(targetY - p.y, -POINTER_SPEED * dt, POINTER_SPEED * dt);
+      p.y = clamp(y, TOP_MARGIN + p.height / 2, HEIGHT - p.height / 2);
     }
 
     gapY(note) {
@@ -98,19 +106,21 @@
       return Math.max(p.y - p.height / 2 - note.y, note.y - (p.y + p.height / 2), 0) - note.radius;
     }
 
-    update(songTime, dt, direction) {
+    /** Advance to songTime. The paddle follows targetY (a pointer) if given, else moves by direction. */
+    update(songTime, dt, direction, targetY = null) {
       const events = [];
       if (this.over || this.cleared) return events;
       const prev = this.songTime;
       this.songTime = songTime;
-      this.movePaddle(direction, dt);
+      this.movePaddle(direction, dt, targetY);
 
       const notes = this.chart.notes;
       while (this.next < notes.length && notes[this.next].t - this.chart.travel_time <= songTime) {
         const c = notes[this.next++];
         const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength, midi: c.midi,
                     radius: NOTE_RADIUS * (0.85 + 0.4 * c.strength), x: -NOTE_RADIUS,
-                    passed: false, hit: false };
+                    duration: c.duration || 0, passed: false, hit: false,
+                    holding: false, holdBroken: false, holdPoints: 0 };
         this.notes.push(n);
         events.push({ kind: 'spawn', x: 0, y: n.y });
       }
@@ -119,7 +129,8 @@
         this.step(n, prev, songTime, events);
         if (this.over) return events;
       }
-      this.notes = this.notes.filter((n) => !n.hit && n.x - n.radius < WIDTH);
+      const speed = this.chart.speed;
+      this.notes = this.notes.filter((n) => !(n.hit && !n.holding) && n.x - n.duration * speed - n.radius < WIDTH);
 
       if (songTime >= this.duration && this.next >= notes.length && this.notes.length === 0) {
         this.cleared = true;
@@ -133,6 +144,7 @@
     step(n, prev, now, events) {
       const xPrev = this.xAt(n.t, prev);
       n.x = this.xAt(n.t, now);
+      if (n.holding) { this.hold(n, prev, now, events); return; }
       if (n.passed) return;
       const p = this.paddle;
       const crossing = xPrev - n.radius <= p.x + p.width && n.x + n.radius >= p.x;
@@ -162,8 +174,37 @@
       const points = (perfect ? POINTS_PERFECT : POINTS_CATCH) * oldLevel;
       this.score += points;
       events.push({ kind: perfect ? 'perfect' : 'catch', x: n.x, y: n.y, value: points, midi: n.midi });
+      if (n.duration > 0) {
+        n.holding = true;
+        this.holds++;
+        events.push({ kind: 'hold_start', x: n.x, y: n.y, value: Math.round(n.duration * 1000), midi: n.midi });
+      }
       if (this.multiplier > oldLevel) {
         events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier, midi: n.midi });
+      }
+    }
+
+    /** Score while the paddle stays on a hold note's tail. */
+    hold(n, prev, now, events) {
+      const end = n.t + n.duration;
+      const overlap = Math.max(0, Math.min(now, end) - Math.max(prev, n.t));
+      const p = this.paddle;
+      if (this.gapY(n) < 0) {
+        const before = Math.floor(n.holdPoints);
+        n.holdPoints += POINTS_HOLD_PER_SECOND * this.multiplier * overlap;
+        this.score += Math.floor(n.holdPoints) - before;
+      } else if (!n.holdBroken && overlap > 0) {
+        n.holdBroken = true;
+        events.push({ kind: 'hold_break', x: p.x, y: n.y, midi: n.midi });
+      }
+      if (now >= end) {
+        n.holding = false;
+        if (!n.holdBroken) {
+          const bonus = POINTS_HOLD_BONUS * this.multiplier;
+          this.score += bonus;
+          this.holdsCompleted++;
+          events.push({ kind: 'hold_done', x: p.x, y: n.y, value: bonus, midi: n.midi });
+        }
       }
     }
 
@@ -224,11 +265,46 @@
     }
 
     stop() {
+      this.holdStop();
       if (this.source) {
         try { this.source.stop(); } catch (e) { /* already stopped */ }
         this.source.disconnect();
         this.source = null;
       }
+    }
+
+    /** A soft sustained tone in key while the player holds a hold note. */
+    holdStart(midi, seconds) {
+      if (!this.ctx || this.muted) return;
+      this.holdStop();
+      const now = this.ctx.currentTime;
+      const hz = 440 * 2 ** ((midi - 69) / 12);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.05, now + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.025, now + seconds);
+      g.connect(this.master);
+      const oscs = [hz, hz * 2].map((f, i) => {
+        const o = this.ctx.createOscillator();
+        o.type = i ? 'sine' : 'triangle';
+        o.frequency.value = f;
+        o.connect(g);
+        o.start(now);
+        o.stop(now + seconds + 0.3);
+        return o;
+      });
+      this.holdVoice = { g, oscs };
+    }
+
+    holdStop() {
+      const v = this.holdVoice;
+      if (!v || !this.ctx) return;
+      this.holdVoice = null;
+      const now = this.ctx.currentTime;
+      v.g.gain.cancelScheduledValues(now);
+      v.g.gain.setValueAtTime(Math.max(v.g.gain.value, 0.0001), now);
+      v.g.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+      for (const o of v.oscs) { try { o.stop(now + 0.15); } catch (e) { /* already stopped */ } }
     }
 
     pause() { if (this.ctx) return this.ctx.suspend(); }
@@ -263,7 +339,7 @@
      * Small synthesised effects. Success sounds take the song's current pitch
      * class (``midi``) so playing well adds notes in key instead of clashing.
      */
-    sfx(kind, midi = 72) {
+    sfx(kind, midi = 72, value = 0) {
       if (!this.ctx || this.muted) return;
       const hz = (m) => 440 * 2 ** ((m - 69) / 12);
       const presets = {
@@ -275,6 +351,9 @@
         game_over: { freqs: [196, 147, 98], dur: 0.9, vol: 0.2, type: 'triangle', arp: 0.18 },
         cleared:   { freqs: [523, 659, 784, 1047], dur: 0.9, vol: 0.12, type: 'triangle', arp: 0.1 },
       };
+      if (kind === 'hold_start') return this.holdStart(midi, value / 1000);
+      if (kind === 'hold_break') return this.holdStop();
+      if (kind === 'hold_done') { this.holdStop(); kind = 'level_up'; }
       const p = presets[kind];
       if (!p) return;
       const now = this.ctx.currentTime;
@@ -383,6 +462,11 @@
         } else if (e.kind === 'miss') {
           this.burst(e.x, e.y, COLORS.dim, 6, 80, 0.4, 2);
           this.judge('miss', e.x - 70, e.y - 20, COLORS.dim);
+        } else if (e.kind === 'hold_done') {
+          this.burst(e.x, e.y, COLORS.gold, 14, 200);
+          this.judge(`HELD +${e.value}`, e.x - 150, e.y - 26, COLORS.gold);
+        } else if (e.kind === 'hold_break') {
+          this.judge('slipped', e.x - 100, e.y - 20, COLORS.dim);
         } else if (e.kind === 'level_up') {
           this.popups.push({ text: `x${e.value}!`, x: WIDTH / 2 - 30, y: HEIGHT / 2 - 40, life: 1.0, color: COLORS.accent });
         } else if (e.kind === 'spawn') {
@@ -422,6 +506,21 @@
       if (i < 0) return 0;
       const strength = i % 4 === 0 ? 1 : 0.6;
       return strength * Math.exp(-(t - beats[i]) * 8);
+    }
+
+    /** A hold note's tail: a bar back from the head along the time it's held for. */
+    holdTail(w, n, color) {
+      const c = this.ctx;
+      const xEnd = n.x - n.duration * w.speed;
+      const xStart = n.holding ? Math.min(n.x, w.paddle.x + w.paddle.width / 2) : n.x;
+      if (xStart <= xEnd) return;
+      const live = n.holding && !n.holdBroken;
+      const dead = n.passed && !n.hit; // head was missed
+      const h = n.radius * (live ? 1.3 : 0.9);
+      c.globalAlpha = dead ? 0.25 : live ? 0.9 : 0.5;
+      c.fillStyle = dead ? COLORS.dim : color;
+      roundRect(c, xEnd, n.y - h / 2, xStart - xEnd, h, h / 2);
+      c.globalAlpha = 1;
     }
 
     hazard(x, y, r, t) {
@@ -497,6 +596,10 @@
       }
 
       // The melody path: a line through the upcoming catch notes, where they will be.
+      c.save();
+      c.beginPath();
+      c.rect(0, TOP_MARGIN, PADDLE_X + PADDLE_WIDTH / 2, HEIGHT - TOP_MARGIN);
+      c.clip(); // nothing past the paddle
       c.strokeStyle = '#5a46a0';
       c.lineWidth = 2;
       c.beginPath();
@@ -504,13 +607,16 @@
       for (const n of w.chart.notes) {
         if (n.kind !== 'catch') continue;
         const x = w.xAt(n.t, t);
-        if (x > PADDLE_X + 40) continue;
+        const xEnd = w.xAt(n.t + (n.duration || 0), t); // the paddle stays put through a hold
+        if (xEnd > PADDLE_X + 40) continue;
         const y = pitchToY(n.pitch);
         started ? c.lineTo(x, y) : c.moveTo(x, y);
+        if (n.duration) c.lineTo(xEnd, y);
         started = true;
         if (x < -40) break;
       }
       c.stroke();
+      c.restore();
       const ahead = t + w.chart.travel_time;
       if (ahead >= 0 && ahead <= w.duration) {
         const pitch = w.song.pitchAt(ahead);
@@ -521,6 +627,8 @@
       for (const n of w.notes) {
         if (n.kind === 'hazard') { this.hazard(n.x, n.y, n.radius * 1.4, t); continue; }
         const color = pitchColor(n.pitch);
+        if (n.duration > 0) this.holdTail(w, n, color);
+        if (n.hit) continue; // head already caught; only the tail is left
         for (let i = 3; i >= 1; i--) {
           c.globalAlpha = 0.5 - i * 0.12;
           c.fillStyle = color;
@@ -647,6 +755,7 @@
     world: null,
     best: 0,
     keys: new Set(),
+    pointerY: null, // game-space height of the mouse/trackpad/finger; null = keyboard control
     t: 0,
     lastFrame: performance.now(),
     autoplay: params.has('autoplay'),
@@ -667,6 +776,7 @@
 
   function show(screen) {
     state.screen = screen;
+    document.body.classList.toggle('playing', screen === 'playing');
     $('menu').classList.toggle('hidden', !(screen === 'menu' || screen === 'loading'));
     $('paused').classList.toggle('hidden', screen !== 'paused');
     $('results').classList.toggle('hidden', screen !== 'results');
@@ -676,16 +786,17 @@
 
   // ---------------- menu
 
-  async function refreshSongs(select) {
+  async function refreshSongs(select, { quiet = false } = {}) {
     try {
       const { songs } = await api.json('/api/songs');
       state.songs = songs;
       const remembered = select || localStorageGet('song');
       state.selected = songs.find((s) => s.file === remembered) || songs[0] || null;
+      if (quiet && state.screen !== 'menu') return;
       renderSongs();
       if (!songs.length) setStatus('No songs yet: drop one onto the page.');
     } catch (e) {
-      setStatus(`Can't reach the server: ${e.message}`, true);
+      if (!quiet) setStatus(`Can't reach the server: ${e.message}`, true);
     }
   }
 
@@ -698,7 +809,9 @@
       li.setAttribute('aria-selected', String(state.selected && s.file === state.selected.file));
       li.innerHTML = '<span></span><small></small>';
       li.firstChild.textContent = s.name;
-      li.lastChild.textContent = s.bundled ? 'bundled' : '';
+      const badge = { ready: '✓ ready', analysing: 'analysing…', queued: 'queued', error: "can't read" }[s.status];
+      li.lastChild.textContent = [s.bundled ? 'bundled' : '', badge || ''].filter(Boolean).join(' · ');
+      if (s.status === 'error') li.classList.add('error');
       li.addEventListener('click', () => selectSong(s));
       li.addEventListener('dblclick', () => { selectSong(s); start(); });
       ul.appendChild(li);
@@ -757,6 +870,42 @@
 
   // ---------------- game flow
 
+  /** Show analysis progress for a song while it loads; returns a function that stops it. */
+  function trackProgress(sel, enc) {
+    const bar = $('load-progress');
+    let stopped = false;
+    const paint = (st) => {
+      if (stopped) return;
+      if (st.state === 'ready') {
+        bar.classList.add('hidden');
+        setStatus(`Loading ${sel.name}…`);
+        return;
+      }
+      bar.classList.remove('hidden');
+      bar.value = st.progress || 0;
+      const pct = Math.round((st.progress || 0) * 100);
+      setStatus(st.state === 'analysing'
+        ? `Analysing ${sel.name}… ${pct}% (only the first time)`
+        : `Waiting to analyse ${sel.name}…`);
+    };
+    const poll = async () => {
+      while (!stopped) {
+        try { paint(await api.json(`/api/songs/${enc}/status`)); } catch (e) { /* keep trying */ }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    };
+    poll();
+    return () => { stopped = true; bar.classList.add('hidden'); };
+  }
+
+  // Keep the song list's ready/analysing badges fresh while songs analyse in the background.
+  setInterval(() => {
+    if (state.screen !== 'menu') return;
+    if (state.songs.some((s) => s.status === 'queued' || s.status === 'analysing')) {
+      refreshSongs(state.selected && state.selected.file, { quiet: true });
+    }
+  }, 1500);
+
   async function start() {
     if (!state.selected || state.screen === 'loading') return;
     const sel = state.selected;
@@ -765,10 +914,10 @@
     try {
       if (!state.loaded || state.loaded.file !== sel.file) {
         show('loading');
-        setStatus(`Analysing ${sel.name}… (first time takes a few seconds)`);
         const enc = encodeURIComponent(sel.file);
+        const stopProgress = trackProgress(sel, enc);
         const [data, buf] = await Promise.all([
-          api.json(`/api/songs/${enc}/analysis`),
+          api.json(`/api/songs/${enc}/analysis`).finally(stopProgress),
           audioCache.get(sel.file) || fetch(`/api/songs/${enc}/audio`).then((r) => {
             if (!r.ok) throw new Error(`audio: ${r.status}`);
             return r.arrayBuffer();
@@ -784,6 +933,7 @@
       setStatus(`Couldn't load ${sel.name}: ${e.message}`, true);
       return;
     }
+    state.pointerY = null; // start under keyboard control until the pointer moves
     state.world = new World(state.loaded.song, state.loaded.song.charts[state.difficulty]);
     renderer.clearEffects();
     await audio.play(state.world.chart.count_in);
@@ -806,6 +956,7 @@
     audio.stop();
     audio.resume();
     show('menu');
+    refreshSongs(state.selected && state.selected.file, { quiet: true }); // badges may have changed
     refreshBest();
   }
 
@@ -819,6 +970,7 @@
     const stats = [
       ['caught', `${w.caught} (${w.perfect} perfect)`], ['missed', w.missed],
       ['accuracy', `${Math.round(w.accuracy * 100)}%`], ['hazards hit', w.hits],
+      ['holds', `${w.holdsCompleted} / ${w.holds}`],
       ['best combo', w.bestStreak], ['song', `${Math.round(w.progress * 100)}%`],
     ];
     $('results-stats').innerHTML = '';
@@ -963,8 +1115,18 @@
     const k = state.keys;
     const up = k.has('ArrowUp') || k.has('KeyW');
     const down = k.has('ArrowDown') || k.has('KeyS');
+    if (up || down) state.pointerY = null; // keys take over until the pointer moves again
     return (down ? 1 : 0) - (up ? 1 : 0);
   }
+
+  /** Mouse, trackpad or touch: the paddle follows the pointer's height over the game. */
+  function onPointer(e) {
+    const rect = $('game').getBoundingClientRect();
+    if (!rect.height) return;
+    state.pointerY = ((e.clientY - rect.top) / rect.height) * HEIGHT;
+  }
+  window.addEventListener('pointermove', onPointer);
+  window.addEventListener('pointerdown', (e) => { if (state.screen === 'playing') onPointer(e); });
 
   /** Chase the next catch note, sidestepping hazards (for demos and tests: ?autoplay). */
   function botDirection() {
@@ -1068,9 +1230,10 @@
       const w = state.world;
       const songTime = audio.position();
       const dt = clamp(songTime - w.songTime, 0, MAX_FRAME);
-      const events = w.update(songTime, dt, direction());
+      const dir = direction();
+      const events = w.update(songTime, dt, dir, state.autoplay ? null : state.pointerY);
       renderer.react(events);
-      for (const e of events) audio.sfx(e.kind, e.midi);
+      for (const e of events) audio.sfx(e.kind, e.midi, e.value);
       if (w.over || w.cleared) finish();
     }
     if (state.screen !== 'paused') renderer.tick(frameDt);
