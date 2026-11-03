@@ -1,10 +1,10 @@
 # 🎵 Pitch Dodge
 
-**Dodge the melody.** Pitch Dodge turns any song into a bullet-dodging game: it
-listens to the track, and every time a note lands it fires a projectile from the
-left edge of the screen at the height of the current pitch. Low notes come in
-low and warm-coloured, high notes come in high and cool. Steer your paddle out
-of the way, build a streak, and survive to the end of the song.
+**Catch the melody, dodge the drums.** Pitch Dodge turns any song into a
+rhythm game. It listens to the track and charts it: glowing notes ride the
+melody's pitch toward your paddle and arrive exactly on the beat, so catching
+them means tracing the tune up and down. Each catch plays a note in the song's
+key. Red spikes land on the big drum hits; touching one costs a life.
 
 ![Gameplay](docs/demo.gif)
 
@@ -92,23 +92,31 @@ The original pygame window still works:
 
 Switching to another tab or window pauses the game.
 
-- Every note that gets past your paddle without touching it scores **10 points**,
-  or **15** for a near miss.
-- Every 10 dodges in a row raises your **multiplier** (up to ×8). Getting hit
-  resets it.
-- A hit costs a **life** and makes you briefly invulnerable. Lose them all and it's
-  game over; clear the song for a bonus of 250 per life left.
-- Notes speed up and come more often as the song goes on.
-- The faint line across the screen is the song's recent melody, the path the
-  notes are being fired along.
+- **Catch** the glowing notes: each scores **10**, or **15** for a PERFECT
+  (caught near the middle of the paddle), times your multiplier.
+- Every 10 catches in a row raises the **multiplier** (up to ×8). Missing a
+  note resets the combo but doesn't cost a life.
+- **Dodge** the red spikes. A hit costs a **life** and the combo, and makes you
+  briefly invulnerable. Lose them all and it's game over; finish the song for a
+  bonus of 250 per life left.
+- The purple line is the melody path through the upcoming notes; faint
+  vertical lines are the beats coming toward you.
+- Quiet parts of a song are calmer; loud parts fill in more of the beat.
 - Top 5 scores are kept per song and difficulty in
   `~/.local/share/pitch_dodge/scores.json`.
 
-| Difficulty | Lives | Notes | Speed |
+| Difficulty | Lives | Notes land on | Hazards |
 | --- | --- | --- | --- |
-| easy | 5 | sparse | gentle |
-| normal | 3 | follows the beat | ramps up |
-| hard | 2 | nearly every onset | fast, steep angles |
+| easy | 5 | beats | only the biggest hits |
+| normal | 3 | beats and half beats | strong hits |
+| hard | 3 | down to quarter beats | most hits, faster scroll |
+
+### Audio delay (AirPods and other Bluetooth headphones)
+
+Bluetooth headphones play sound 150–250 ms late, which makes notes seem to
+arrive early. On the menu, press **Calibrate** and tap **Space** on each click
+you hear; the game measures your delay and remembers it. You can also drag the
+**Audio delay** slider by hand. In the desktop version use `--latency-ms 200`.
 
 ![Title screen](docs/title.png)
 
@@ -116,35 +124,40 @@ Switching to another tab or window pauses the game.
 
 ```
 pitch-dodge serve [--port N] [--host ADDR] [--songs DIR] [--no-browser] [--no-cache]
-pitch-dodge [song] [-d {easy,normal,hard}] [--mute] [--seed N] [--no-cache]
+pitch-dodge [song] [-d {easy,normal,hard}] [--mute] [--latency-ms MS] [--no-cache]
 ```
 
-In the desktop version, `--seed` makes note angles repeatable (in the browser,
-add `?seed=N` to the URL). If no audio device is available the desktop game
-runs silently instead of crashing.
+If no audio device is available the desktop game runs silently instead of
+crashing. Add `?autoplay` to the browser URL to watch a bot play.
 
 ## How it works
 
 1. **Analysis** (`pitch_dodge/analysis.py`): the song is loaded with
-   [librosa](https://librosa.org/). Pitch is tracked with `piptrack`, quiet frames
-   are dropped, gaps are filled, the curve is median-smoothed on a log scale and
-   normalised between its 5th and 95th percentiles. Onsets decide when notes are
-   fired; RMS loudness drives the background pulse.
-2. **Rules** (`pitch_dodge/world.py`): pure Python with no pygame, so it's fully
-   unit tested. Notes move in sub-steps so even fast ones can't tunnel through
-   the paddle on a slow frame.
-3. **Clock** (`pitch_dodge/audio.py`): the game runs on the music's playback
-   position, not the wall clock, so the notes stay in sync with what you hear,
-   including across pauses.
-4. **Drawing** (`pitch_dodge/render.py`) and the **state machine**
+   [librosa](https://librosa.org/). It finds the beat, splits the sound into
+   harmonic (melody, chords) and percussive (drums) parts and measures onset
+   strength in each, tracks pitch (smoothed on a log scale), finds the
+   dominant pitch class over time, and measures loudness. Results are cached.
+2. **Chart** (`pitch_dodge/chart.py`): like a rhythm-game chart. Catch notes
+   go on beat-grid points with strong harmonic onsets, at the melody's height
+   (with impossible jumps squashed); hazards go on the strongest drum hits,
+   away from the melody. Difficulty sets how fine the grid goes; the song's
+   loudness decides how much of it is used at each moment.
+3. **Rules** (`pitch_dodge/world.py`): pure Python with no pygame, so it's fully
+   unit tested. A note's position is computed from song time
+   (`x = paddle_x - (arrival - now) * speed`), so it crosses the paddle exactly
+   on its beat at any frame rate.
+4. **Clock** (`pitch_dodge/audio.py`): the game runs on the music's playback
+   position (minus your audio delay), not the wall clock, with a count-in
+   before the music so the first notes can land on the first beats.
+5. **Drawing** (`pitch_dodge/render.py`) and the **state machine**
    (`pitch_dodge/app.py`): title, playing, paused and results screens.
    Sound effects are synthesised at start-up (`pitch_dodge/sfx.py`).
-5. **Browser version**: `pitch_dodge/server.py` is a small standard-library
+6. **Browser version**: `pitch_dodge/server.py` is a small standard-library
    HTTP server bound to localhost. It serves the page, the song list, uploads,
-   high scores, and each song's analysis as JSON. `pitch_dodge/web/game.js`
-   is a port of the rules and drawing to canvas. Its clock is the Web Audio
-   playback position, so pausing suspends the music and the game together.
-   The rules mirror `world.py`; change both together.
+   high scores, and each song's charts as JSON. `pitch_dodge/web/game.js`
+   plays the charts on a canvas. Its clock is the Web Audio playback position,
+   so pausing suspends the music and the game together. Its rules mirror
+   `world.py`; change both together.
 
 ## Development
 
