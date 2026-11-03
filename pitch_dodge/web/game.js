@@ -179,6 +179,7 @@
       this.source = null;
       this.startedAt = 0;
       this.muted = false;
+      this.offset = 0; // extra delay the player measured (seconds), e.g. for Bluetooth headphones
     }
 
     ensure() {
@@ -226,7 +227,20 @@
     position() {
       if (!this.ctx || !this.source) return 0;
       const latency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
-      return this.ctx.currentTime - this.startedAt - latency;
+      return this.ctx.currentTime - this.startedAt - latency - this.offset;
+    }
+
+    /** A metronome click at context time ``when`` (for calibration). */
+    click(when, accent) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.frequency.value = accent ? 1760 : 1320;
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.exponentialRampToValueAtTime(0.5, when + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.06);
+      osc.connect(g).connect(this.master);
+      osc.start(when);
+      osc.stop(when + 0.08);
     }
 
     setMuted(m) {
@@ -595,6 +609,7 @@
     t: 0,
     lastFrame: performance.now(),
     autoplay: params.has('autoplay'),
+    latency: 0, // ms, see setLatency
   };
   const audio = new Audio();
   const renderer = new Renderer($('game'));
@@ -614,6 +629,7 @@
     $('menu').classList.toggle('hidden', !(screen === 'menu' || screen === 'loading'));
     $('paused').classList.toggle('hidden', screen !== 'paused');
     $('results').classList.toggle('hidden', screen !== 'results');
+    $('calibrate').classList.toggle('hidden', screen !== 'calibrate');
     $('play').disabled = screen === 'loading' || !state.selected;
   }
 
@@ -791,6 +807,115 @@
     localStorageSet('muted', audio.muted ? '1' : '');
   }
 
+  // ---------------- audio delay (latency) calibration
+
+  const CALIBRATE = { clicks: 16, interval: 0.6, skip: 4, minTaps: 6 };
+  const LATENCY_MIN = -100, LATENCY_MAX = 400;
+  const cal = { running: false, clicks: [], taps: [], result: null, endAt: 0 };
+
+  function setLatency(ms) {
+    ms = clamp(Math.round(ms / 5) * 5, LATENCY_MIN, LATENCY_MAX);
+    state.latency = ms;
+    audio.offset = ms / 1000;
+    $('latency').value = String(ms);
+    $('latency-value').textContent = `${ms > 0 ? '+' : ''}${ms} ms`;
+    localStorageSet('latency', String(ms));
+  }
+
+  /**
+   * Median of (tap - click - reported output latency) for taps matched to a
+   * click, ignoring the first few clicks while the player finds the beat.
+   * Whatever the browser already reports as output latency is compensated
+   * automatically, so this is only the remainder.
+   */
+  function measureOffset(clicks, taps, outputLatency) {
+    const diffs = [];
+    for (const tap of taps) {
+      let best = -1;
+      for (let i = 0; i < clicks.length; i++) {
+        if (best < 0 || Math.abs(tap - clicks[i]) < Math.abs(tap - clicks[best])) best = i;
+      }
+      // A tap belongs to the click before it if it's late, so allow up to most of an interval.
+      if (best >= CALIBRATE.skip && Math.abs(tap - clicks[best]) < CALIBRATE.interval * 0.8) {
+        diffs.push(tap - clicks[best] - outputLatency);
+      }
+    }
+    if (diffs.length < CALIBRATE.minTaps) return null;
+    diffs.sort((a, b) => a - b);
+    const mid = diffs.length >> 1;
+    const median = diffs.length % 2 ? diffs[mid] : (diffs[mid - 1] + diffs[mid]) / 2;
+    return median * 1000;
+  }
+
+  function openCalibration() {
+    cal.running = false;
+    cal.result = null;
+    $('calibrate-dots').textContent = '';
+    $('calibrate-result').textContent = '';
+    $('calibrate-hint').textContent = `Current delay: ${state.latency} ms`;
+    $('calibrate-start').classList.remove('hidden');
+    $('calibrate-save').classList.add('hidden');
+    show('calibrate');
+  }
+
+  async function startCalibration() {
+    const ctx = audio.ensure();
+    if (ctx.state === 'suspended') await ctx.resume();
+    audio.stop();
+    const t0 = ctx.currentTime + 0.6;
+    cal.clicks = [];
+    cal.taps = [];
+    for (let i = 0; i < CALIBRATE.clicks; i++) {
+      const t = t0 + i * CALIBRATE.interval;
+      cal.clicks.push(t);
+      audio.click(t, i % 4 === 0);
+    }
+    cal.endAt = cal.clicks[cal.clicks.length - 1] + 0.8;
+    cal.running = true;
+    cal.result = null;
+    $('calibrate-result').textContent = '';
+    $('calibrate-hint').textContent = 'Listen, then tap along…';
+    $('calibrate-start').classList.add('hidden');
+    $('calibrate-save').classList.add('hidden');
+  }
+
+  function calibrationTap() {
+    if (!cal.running) return;
+    cal.taps.push(audio.ctx.currentTime);
+  }
+
+  function tickCalibration() {
+    if (!cal.running) return;
+    const now = audio.ctx.currentTime - (audio.ctx.outputLatency || 0);
+    const heard = cal.clicks.filter((c) => c <= now).length;
+    $('calibrate-dots').textContent = '●'.repeat(heard) + '○'.repeat(CALIBRATE.clicks - heard);
+    if (audio.ctx.currentTime < cal.endAt) return;
+    cal.running = false;
+    const ms = measureOffset(cal.clicks, cal.taps, audio.ctx.outputLatency || 0);
+    $('calibrate-start').classList.remove('hidden');
+    $('calibrate-start').firstChild.textContent = 'Try again ';
+    if (ms == null) {
+      $('calibrate-hint').textContent = 'Not enough taps landed near the clicks. Try again?';
+      return;
+    }
+    cal.result = clamp(Math.round(ms / 5) * 5, LATENCY_MIN, LATENCY_MAX);
+    $('calibrate-result').textContent = `${cal.result > 0 ? '+' : ''}${cal.result} ms`;
+    $('calibrate-hint').textContent = 'Use this delay? (Enter)';
+    $('calibrate-save').classList.remove('hidden');
+  }
+
+  function saveCalibration() {
+    if (cal.result == null) return;
+    setLatency(cal.result);
+    toMenu();
+  }
+
+  $('latency').addEventListener('input', (e) => setLatency(Number(e.target.value)));
+  $('calibrate-open').addEventListener('click', openCalibration);
+  $('calibrate-start').addEventListener('click', startCalibration);
+  $('calibrate-save').addEventListener('click', saveCalibration);
+  $('calibrate-cancel').addEventListener('click', () => { cal.running = false; toMenu(); });
+
   // ---------------- input
 
   function direction() {
@@ -827,6 +952,11 @@
 
     if (code === 'KeyM') return toggleMute();
     switch (state.screen) {
+      case 'calibrate':
+        if (code === 'Space') (cal.running ? calibrationTap() : startCalibration());
+        else if (code === 'Enter') saveCalibration();
+        else if (code === 'Escape') { cal.running = false; toMenu(); }
+        break;
       case 'menu':
         if (code === 'Space' || code === 'Enter') start();
         else if (code === 'ArrowLeft' || code === 'ArrowRight') {
@@ -893,6 +1023,7 @@
     const frameDt = Math.min((now - state.lastFrame) / 1000, MAX_FRAME);
     state.lastFrame = now;
     state.t += frameDt;
+    if (state.screen === 'calibrate') tickCalibration();
 
     if (state.screen === 'playing') {
       const w = state.world;
@@ -905,7 +1036,7 @@
     }
     if (state.screen !== 'paused') renderer.tick(frameDt);
 
-    if (state.world && state.screen !== 'menu' && state.screen !== 'loading') {
+    if (state.world && !['menu', 'loading', 'calibrate'].includes(state.screen)) {
       renderer.worldScene(state.world);
       renderer.hud(state.world, state.best, audio.muted);
     } else {
@@ -915,9 +1046,10 @@
   }
 
   // Exposed for tests and the curious.
-  window.PitchDodge = { state, World, Song };
+  window.PitchDodge = { state, World, Song, measureOffset, audio, cal };
 
   audio.setMuted(!!localStorageGet('muted'));
+  setLatency(Number(localStorageGet('latency') || 0));
   renderDifficulty();
   show('menu');
   refreshSongs();

@@ -82,3 +82,25 @@ def test_serve_args():
 
     args = parse_serve_args(["--port", "9000", "--no-browser"])
     assert args.port == 9000 and args.no_browser and args.host == "127.0.0.1"
+
+
+def test_latency_shifts_game_time_behind_audio(song, tmp_path):
+    app = App(song, mute=True, scores=ScoreBoard(tmp_path / "s.json"), latency_ms=200)
+    app._load()
+    app._start()
+
+    class Fixed:
+        def position(self):
+            return 1.0
+
+        def stop(self):
+            pass
+
+    app.song_clock = Fixed()
+    app._update(1 / 60)
+    assert app.world.song_time == pytest.approx(0.8)
+    pygame.quit()
+
+
+def test_cli_latency_flag():
+    assert parse_args(["--latency-ms", "180"]).latency_ms == 180

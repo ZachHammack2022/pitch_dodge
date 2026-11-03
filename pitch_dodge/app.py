@@ -30,6 +30,7 @@ class App:
         max_frames: int | None = None,
         autoplay: bool = False,
         start_playing: bool = False,
+        latency_ms: float = 0.0,
     ):
         self.song_path = str(song_path)
         self.song_name = Path(song_path).stem.replace("_", " ")
@@ -40,6 +41,7 @@ class App:
         self.max_frames = max_frames
         self.autoplay = autoplay  # a simple bot, for demos and smoke tests
         self.start_playing = start_playing
+        self.latency = latency_ms / 1000  # how late the player hears the music (e.g. Bluetooth)
 
         pygame.init()
         flags = pygame.SCALED | pygame.RESIZABLE
@@ -195,7 +197,7 @@ class App:
     def _update(self, frame_dt: float) -> None:
         if self.state == "playing":
             w = self.world
-            song_time = self.song_clock.position()
+            song_time = self.song_clock.position() - self.latency
             dt = min(max(song_time - w.song_time, 0.0), MAX_FRAME)
             events = w.update(song_time, dt, self._direction())
             self.renderer.react(events)

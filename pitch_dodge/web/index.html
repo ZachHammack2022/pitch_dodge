@@ -31,6 +31,12 @@
         <button data-d="hard">hard</button>
       </div>
       <p id="best" class="best"></p>
+      <div class="sync">
+        <label for="latency">Audio delay</label>
+        <input id="latency" type="range" min="-100" max="400" step="5" value="0">
+        <output id="latency-value" for="latency">0 ms</output>
+        <button id="calibrate-open" type="button">Calibrate</button>
+      </div>
     </div>
 
     <button id="play" class="primary">Play <kbd>Space</kbd></button>
@@ -39,6 +45,19 @@
       <kbd>↑</kbd><kbd>↓</kbd> or <kbd>W</kbd><kbd>S</kbd> move &nbsp;·&nbsp;
       <kbd>P</kbd> pause &nbsp;·&nbsp; <kbd>M</kbd> mute &nbsp;·&nbsp; <kbd>R</kbd> restart
     </p>
+  </section>
+
+  <section id="calibrate" class="overlay hidden">
+    <h1>SYNC</h1>
+    <p class="tag">Bluetooth headphones (like AirPods) play sound late.<br>Tap <kbd>Space</kbd> on every click you hear, in time with the beat.</p>
+    <p id="calibrate-dots" class="dots" aria-hidden="true"></p>
+    <p id="calibrate-result" class="big"></p>
+    <p id="calibrate-hint" class="status"></p>
+    <div class="row">
+      <button id="calibrate-start" class="primary">Start <kbd>Space</kbd></button>
+      <button id="calibrate-save" class="primary hidden">Use this</button>
+      <button id="calibrate-cancel">Back <kbd>Esc</kbd></button>
+    </div>
   </section>
 
   <section id="paused" class="overlay hidden">
