@@ -143,3 +143,32 @@ def test_melody_jumps_are_made_reachable():
     assert out[1] < 0.3 and out[1] > 0  # squashed, direction kept
     assert out[2] < out[1]
     assert out[3] == 1.0  # plenty of time: untouched
+
+
+def test_loud_sections_get_more_notes_than_quiet_ones():
+    # First half quiet, second half loud; the music is otherwise identical.
+    song = make_song(
+        duration=40,
+        beats=np.arange(0.5, 40, 0.5),
+        energy=lambda t: 0.1 if t < 20 else 0.9,
+        strength=lambda t: 0.4 + 0.6 * ((t * 4) % 1 < 0.5),
+        percussive=lambda t: 1.0 if (t % 1) < 0.05 else 0.1,
+    )
+    for name in ("normal", "hard"):
+        chart = build_chart(song, DIFFICULTIES[name])
+        quiet = [n for n in catches(chart) if 2 < n.t < 18]
+        loud = [n for n in catches(chart) if 22 < n.t < 38]
+        assert len(loud) > 1.5 * len(quiet), (name, len(quiet), len(loud))
+        assert all(n.level == 0 for n in quiet)  # only beats while it's quiet
+        assert not [h for h in hazards(chart) if h.t < 18]  # no hazards in the quiet part
+        assert [h for h in hazards(chart) if h.t > 22]
+
+
+def test_intensity_curve():
+    from pitch_dodge.chart import intensity
+
+    song = make_song(duration=30, energy=lambda t: 0.1 if t < 15 else 0.9)
+    curve = intensity(song)
+    assert curve[10] < 0.1 and curve[-10] > 0.9
+    flat = intensity(make_song(duration=10))
+    assert np.allclose(flat, 1.0)  # a song with no quiet parts plays at full intensity

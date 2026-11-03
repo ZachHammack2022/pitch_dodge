@@ -8,7 +8,9 @@ from pitch_dodge.chart import Chart, ChartNote
 HOP = 512 / 22050
 
 
-def make_song(duration=10.0, beats=(), onsets=(), pitch=0.5, strength=None, harmonic=None, percussive=None):
+def make_song(
+    duration=10.0, beats=(), onsets=(), pitch=0.5, strength=None, harmonic=None, percussive=None, energy=None
+):
     """A SongAnalysis with flat features. ``strength`` etc. may be callables of time."""
     n = int(duration / HOP) + 1
     t = np.arange(n) * HOP
@@ -22,7 +24,7 @@ def make_song(duration=10.0, beats=(), onsets=(), pitch=0.5, strength=None, harm
 
     return SongAnalysis(
         pitch=env(pitch, 0.5) if callable(pitch) else np.full(n, pitch),
-        energy=np.full(n, 0.5),
+        energy=env(energy, 0.5),
         onsets=np.asarray(onsets, dtype=float),
         hop_seconds=HOP,
         duration=duration,

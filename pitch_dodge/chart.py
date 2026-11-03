@@ -26,6 +26,12 @@ MIN_COUNT_IN = 1.0  # seconds of count-in before the music starts, at least
 LEVEL_QUANTILE = {0: 0.25, 1: 0.55, 2: 0.70}
 HAZARD_FLOOR = 0.45  # hazards need a drum hit at least this strong (0..1)
 
+# Intensity follows the music: finer subdivisions only open up when the
+# surrounding few seconds are loud enough (smoothed energy, 0..1).
+INTENSITY_WINDOW = 4.0  # seconds
+LEVEL_MIN_INTENSITY = {0: 0.0, 1: 0.35, 2: 0.6}
+HAZARD_MIN_INTENSITY = 0.25
+
 
 @dataclass(frozen=True)
 class ChartNote:
@@ -96,6 +102,28 @@ def beat_grid(beats: np.ndarray, duration: float, finest: int) -> list[tuple[flo
     return points
 
 
+def intensity(song: SongAnalysis, window: float = INTENSITY_WINDOW) -> np.ndarray:
+    """Loudness smoothed over ``window`` seconds, rescaled so the song's quiet parts
+    are near 0 and its loud parts near 1 (10th..90th percentile)."""
+    e = np.asarray(song.energy, dtype=float)
+    if len(e) == 0:
+        return e
+    n = max(1, int(window / song.hop_seconds))
+    smooth = np.convolve(np.pad(e, n // 2, mode="edge"), np.ones(n) / n, mode="same")[
+        n // 2 : n // 2 + len(e)
+    ]
+    lo, hi = np.percentile(smooth, [10, 90])
+    if hi - lo < 1e-6:  # no quiet parts to hold back for: full intensity throughout
+        return np.ones(len(e))
+    return np.clip((smooth - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _at(curve: np.ndarray, song: SongAnalysis, t: float) -> float:
+    if len(curve) == 0:
+        return 0.5
+    return float(curve[min(max(int(t / song.hop_seconds), 0), len(curve) - 1)])
+
+
 def _candidates(
     song: SongAnalysis, difficulty: Difficulty, which: str = "harmonic", quantile: float | None = None
 ) -> list[tuple[float, int, float]]:
@@ -123,9 +151,17 @@ def _candidates(
         cutoff = dict.fromkeys(by_level, bar)
     else:
         cutoff = {lvl: float(np.quantile(v, LEVEL_QUANTILE[lvl])) for lvl, v in by_level.items()}
-    return [
-        (t, level, s) for (t, level), s in zip(grid, strengths, strict=True) if s >= cutoff[level] and s > 0
-    ]
+    loud = intensity(song)
+    min_intensity = HAZARD_MIN_INTENSITY if quantile is not None else None
+    out = []
+    for (t, level), s in zip(grid, strengths, strict=True):
+        if s < cutoff[level] or s <= 0:
+            continue
+        need = min_intensity if min_intensity is not None else LEVEL_MIN_INTENSITY[level]
+        if _at(loud, song, t) < need:
+            continue
+        out.append((t, level, s))
+    return out
 
 
 def _thin(cands: list[tuple[float, int, float]], min_gap: float) -> list[tuple[float, int, float]]:
