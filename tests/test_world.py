@@ -143,3 +143,19 @@ def test_paddle_stays_on_screen():
 def test_pitch_to_y_maps_high_to_top():
     assert pitch_to_y(1.0) < pitch_to_y(0.5) < pitch_to_y(0.0)
     assert pitch_to_y(5) == pitch_to_y(1)
+
+
+def test_dodge_events_carry_midi_for_tuned_sounds():
+    w = world([ChartNote(1.0, 0.0, midi=76)])
+    events = run(w, 1.5)
+    assert [e.midi for e in events if e.kind == "dodge"] == [76]
+
+
+def test_beat_pulse():
+    from pitch_dodge.render import beat_pulse
+
+    beats = [1.0, 1.5, 2.0, 2.5, 3.0]
+    assert beat_pulse(beats, 0.5) == 0
+    assert beat_pulse(beats, 1.0) == pytest.approx(1.0)  # downbeat
+    assert beat_pulse(beats, 1.5) == pytest.approx(0.6)  # off-beat is softer
+    assert beat_pulse(beats, 1.4) < 0.05  # decayed before the next beat

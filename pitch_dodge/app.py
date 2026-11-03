@@ -200,7 +200,7 @@ class App:
             events = w.update(song_time, dt, self._direction())
             self.renderer.react(events)
             for e in events:
-                self.sfx.play(e.kind)
+                self.sfx.play(e.kind, e.midi or 72)
             if w.over or w.cleared:
                 self._finish()
         if self.state != "paused":

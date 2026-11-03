@@ -33,6 +33,7 @@ class ChartNote:
     kind: str = "dodge"
     strength: float = 0.5  # 0..1, how hard the music hits here
     level: int = 0  # 0 = on the beat, 1 = half beat, 2 = quarter beat
+    midi: int = 72  # note to play when this is handled well: the song's pitch class here, octave 5
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,14 @@ def build_chart(song: SongAnalysis, difficulty: Difficulty) -> Chart:
     kept = _fill_gaps(kept, grid_beats, song.duration - 0.1, difficulty.max_gap)
 
     notes = [
-        ChartNote(t=t, pitch=song.pitch_at(t), kind="dodge", strength=float(np.clip(s, 0, 1)), level=level)
+        ChartNote(
+            t=t,
+            pitch=song.pitch_at(t),
+            kind="dodge",
+            strength=float(np.clip(s, 0, 1)),
+            level=level,
+            midi=72 + song.pitch_class_at(t),
+        )
         for t, level, s in kept
     ]
     travel = difficulty.travel_time

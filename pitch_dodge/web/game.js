@@ -105,7 +105,7 @@
       const notes = this.chart.notes;
       while (this.next < notes.length && notes[this.next].t - this.chart.travel_time <= songTime) {
         const c = notes[this.next++];
-        const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength,
+        const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength, midi: c.midi,
                     radius: NOTE_RADIUS * (0.85 + 0.4 * c.strength), x: -NOTE_RADIUS,
                     passed: false, hit: false, ghosted: false, closestGap: Infinity };
         this.notes.push(n);
@@ -149,8 +149,10 @@
         const near = n.closestGap < NEAR_MISS_DISTANCE;
         const points = (near ? POINTS_NEAR_MISS : POINTS_DODGE) * oldLevel;
         this.score += points;
-        events.push({ kind: near ? 'near_miss' : 'dodge', x: n.x, y: n.y, value: points });
-        if (this.multiplier > oldLevel) events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier });
+        events.push({ kind: near ? 'near_miss' : 'dodge', x: n.x, y: n.y, value: points, midi: n.midi });
+        if (this.multiplier > oldLevel) {
+          events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier, midi: n.midi });
+        }
       }
     }
 
@@ -232,13 +234,19 @@
       if (this.master) this.master.gain.value = m ? 0 : 1;
     }
 
-    /** Small synthesised effects. */
-    sfx(kind) {
+    /**
+     * Small synthesised effects. Success sounds take the song's current pitch
+     * class (``midi``) so playing well adds notes in key instead of clashing.
+     */
+    sfx(kind, midi = 72) {
       if (!this.ctx || this.muted) return;
+      const hz = (m) => 440 * 2 ** ((m - 69) / 12);
       const presets = {
         hit:       { freqs: [110, 82], dur: 0.35, vol: 0.35, type: 'sawtooth' },
-        near_miss: { freqs: [1320, 1760], dur: 0.12, vol: 0.08, type: 'sine' },
-        level_up:  { freqs: [660, 880, 1320], dur: 0.35, vol: 0.1, type: 'triangle', arp: 0.06 },
+        dodge:     { freqs: [hz(midi)], dur: 0.18, vol: 0.05, type: 'triangle' },
+        near_miss: { freqs: [hz(midi), hz(midi + 12)], dur: 0.25, vol: 0.07, type: 'triangle' },
+        catch:     { freqs: [hz(midi), hz(midi + 12)], dur: 0.3, vol: 0.09, type: 'triangle' },
+        level_up:  { freqs: [hz(midi), hz(midi + 7), hz(midi + 12)], dur: 0.35, vol: 0.08, type: 'triangle', arp: 0.06 },
         game_over: { freqs: [196, 147, 98], dur: 0.9, vol: 0.2, type: 'triangle', arp: 0.18 },
         cleared:   { freqs: [523, 659, 784, 1047], dur: 0.9, vol: 0.12, type: 'triangle', arp: 0.1 },
       };
@@ -370,6 +378,18 @@
 
     clearEffects() { this.particles = []; this.popups = []; this.shake = this.flash = 0; }
 
+    /** How hard the beat is hitting right now: 1 on a beat, decaying to 0; downbeats (every 4th) hit harder. */
+    beatPulse(beats, t) {
+      let lo = 0, hi = beats.length - 1, i = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (beats[mid] <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      if (i < 0) return 0;
+      const strength = i % 4 === 0 ? 1 : 0.6;
+      return strength * Math.exp(-(t - beats[i]) * 8);
+    }
+
     background() {
       const g = this.ctx.createLinearGradient(0, 0, 0, HEIGHT);
       g.addColorStop(0, '#0a0818');
@@ -403,14 +423,25 @@
       }
       this.background();
 
-      // Grid pulsing with loudness.
+      // Grid pulsing with loudness and the beat.
       const energy = w.song.energyAt(t);
-      c.strokeStyle = `rgba(120, 90, 220, ${(10 + 30 * energy) / 255})`;
+      const pulse = t >= 0 ? this.beatPulse(w.chart.beats, t) : 0;
+      c.strokeStyle = `rgba(120, 90, 220, ${(10 + 30 * energy + 40 * pulse) / 255})`;
       c.lineWidth = 1;
       c.beginPath();
       for (let x = 0; x < WIDTH; x += 48) { c.moveTo(x + 0.5, TOP_MARGIN); c.lineTo(x + 0.5, HEIGHT); }
       for (let y = TOP_MARGIN; y < HEIGHT; y += 48) { c.moveTo(0, y + 0.5); c.lineTo(WIDTH, y + 0.5); }
       c.stroke();
+
+      // Upcoming beats as lines scrolling toward the paddle (every 4th brighter).
+      const beats = w.chart.beats;
+      for (let i = 0; i < beats.length; i++) {
+        const x = PADDLE_X - (beats[i] - t) * w.speed;
+        if (x < 0) break;
+        if (x > PADDLE_X + 4) continue;
+        c.fillStyle = i % 4 === 0 ? 'rgba(160, 140, 255, 0.16)' : 'rgba(160, 140, 255, 0.07)';
+        c.fillRect(x - 1, TOP_MARGIN, 2, HEIGHT - TOP_MARGIN);
+      }
 
       // The melody coming toward the player: whatever is at x now reaches the
       // paddle at song time t + (PADDLE_X - x) / speed.
@@ -429,7 +460,7 @@
       const ahead = t + w.chart.travel_time;
       if (ahead >= 0 && ahead <= w.duration) {
         const pitch = w.song.pitchAt(ahead);
-        this.blitGlow(pitchColor(pitch), 7 + Math.round(5 * energy), 4, pitchToY(pitch));
+        this.blitGlow(pitchColor(pitch), 7 + Math.round(5 * energy + 4 * pulse), 4, pitchToY(pitch));
       }
 
       // Notes with trails.
@@ -450,8 +481,9 @@
       const p = w.paddle;
       if (!w.invulnerable || Math.floor(t * 12) % 2 === 0) {
         const top = p.y - p.height / 2;
-        c.fillStyle = 'rgba(120, 255, 170, 0.2)';
-        roundRect(c, p.x - 12, top - 12, p.width + 24, p.height + 24, 14);
+        const grow = 12 + 6 * pulse;
+        c.fillStyle = `rgba(120, 255, 170, ${0.18 + 0.3 * pulse})`;
+        roundRect(c, p.x - grow, top - grow, p.width + 2 * grow, p.height + 2 * grow, 14);
         c.fillStyle = COLORS.accent;
         roundRect(c, p.x, top, p.width, p.height, 6);
         c.fillStyle = '#dcffe6';
@@ -868,7 +900,7 @@
       const dt = clamp(songTime - w.songTime, 0, MAX_FRAME);
       const events = w.update(songTime, dt, direction());
       renderer.react(events);
-      for (const e of events) audio.sfx(e.kind);
+      for (const e of events) audio.sfx(e.kind, e.midi);
       if (w.over || w.cleared) finish();
     }
     if (state.screen !== 'paused') renderer.tick(frameDt);

@@ -40,6 +40,7 @@ class Note:
     pitch: float
     kind: str
     strength: float = 0.5
+    midi: int = 72
     x: float = -NOTE_RADIUS
     vx: float = 0.0
     radius: float = NOTE_RADIUS
@@ -53,6 +54,7 @@ class Note:
         radius = NOTE_RADIUS * (0.85 + 0.4 * n.strength)
         return cls(
             t=n.t,
+            midi=n.midi,
             y=pitch_to_y(n.pitch),
             pitch=n.pitch,
             kind=n.kind,
@@ -94,6 +96,7 @@ class Event:
     x: float = 0.0
     y: float = 0.0
     value: int = 0
+    midi: int = 0  # for sounds that should play in key
 
 
 @dataclass
@@ -214,9 +217,9 @@ class World:
             near = note.closest_gap < NEAR_MISS_DISTANCE
             points = (POINTS_NEAR_MISS if near else POINTS_DODGE) * old_level
             self.score += points
-            events.append(Event("near_miss" if near else "dodge", note.x, note.y, points))
+            events.append(Event("near_miss" if near else "dodge", note.x, note.y, points, note.midi))
             if self.multiplier > old_level:
-                events.append(Event("level_up", note.x, note.y, self.multiplier))
+                events.append(Event("level_up", note.x, note.y, self.multiplier, note.midi))
 
     def _hit(self, note: Note, events: list[Event]) -> None:
         note.hit = True

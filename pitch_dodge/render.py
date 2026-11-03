@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import colorsys
 import math
 import random
@@ -18,6 +19,14 @@ DIM = (140, 135, 170)
 ACCENT = (120, 255, 170)
 DANGER = (255, 80, 100)
 GOLD = (255, 210, 90)
+
+
+def beat_pulse(beats: list[float], t: float) -> float:
+    """1 on a beat, decaying to 0 before the next; downbeats (every 4th) hit harder."""
+    i = bisect.bisect_right(beats, t) - 1
+    if i < 0 or t < 0:
+        return 0.0
+    return (1.0 if i % 4 == 0 else 0.6) * math.exp(-(t - beats[i]) * 8)
 
 
 def pitch_color(pitch: float) -> tuple[int, int, int]:
@@ -163,10 +172,24 @@ class Renderer:
             pygame.draw.line(grid, (120, 90, 220, alpha), (0, y), (WIDTH, y))
         self.screen.blit(grid, (0, 0))
 
-        # The melody coming toward the player: whatever is at x now will reach
-        # the paddle at song time t + (PADDLE_X - x) / speed.
         speed = world.speed
         px = world.paddle.x
+
+        # Upcoming beats as lines scrolling toward the paddle (every 4th brighter).
+        lines = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        for i, b in enumerate(world.chart.beats):
+            x = px - (b - t) * speed
+            if x < 0:
+                break
+            if x <= px + 4:
+                alpha = 40 if i % 4 == 0 else 18
+                pygame.draw.rect(
+                    lines, (160, 140, 255, alpha), (int(x) - 1, TOP_MARGIN, 2, HEIGHT - TOP_MARGIN)
+                )
+        self.screen.blit(lines, (0, 0))
+
+        # The melody coming toward the player: whatever is at x now will reach
+        # the paddle at song time t + (PADDLE_X - x) / speed.
         pts = []
         for x in range(0, int(px) + 1, 8):
             s = t + (px - x) / speed
@@ -197,14 +220,16 @@ class Renderer:
             g = self._glow(color, int(n.radius))
             self.screen.blit(g, g.get_rect(center=(int(n.x), int(n.y))))
 
-        # Paddle (blinks while invulnerable).
+        # Paddle (blinks while invulnerable, glows on the beat).
         p = world.paddle
+        pulse = beat_pulse(world.chart.beats, world.song_time)
         visible = not world.invulnerable or int(world.song_time * 12) % 2 == 0
         if visible:
             rect = pygame.Rect(int(p.x), int(p.top), p.width, p.height)
-            glow = pygame.Surface((rect.w + 24, rect.h + 24), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*ACCENT, 50), glow.get_rect(), border_radius=14)
-            self.screen.blit(glow, (rect.x - 12, rect.y - 12))
+            grow = int(12 + 6 * pulse)
+            glow = pygame.Surface((rect.w + 2 * grow, rect.h + 2 * grow), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (*ACCENT, int(45 + 75 * pulse)), glow.get_rect(), border_radius=14)
+            self.screen.blit(glow, (rect.x - grow, rect.y - grow))
             pygame.draw.rect(self.screen, ACCENT, rect, border_radius=6)
             pygame.draw.rect(self.screen, (220, 255, 230), rect.inflate(-8, -8), border_radius=4)
 

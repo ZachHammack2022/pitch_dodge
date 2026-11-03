@@ -78,3 +78,10 @@ def test_chart_json_roundtrip_fields():
     data = chart.to_json()
     assert set(data) == {"notes", "beats", "duration", "speed", "travel_time", "count_in"}
     assert set(data["notes"][0]) >= {"t", "pitch", "kind", "strength", "level"}
+
+
+def test_notes_carry_the_songs_pitch_class():
+    song = make_song(duration=10, beats=BEATS_120)
+    song.pitch_class[:] = 7  # G throughout
+    chart = build_chart(song, DIFFICULTIES["normal"])
+    assert {n.midi for n in chart.notes} == {79}

@@ -39,6 +39,34 @@ class Sfx:
         except (pygame.error, ValueError):
             self.sounds = {}
 
-    def play(self, kind: str) -> None:
-        if self.enabled and (s := self.sounds.get(kind)) is not None:
+    # Success sounds play the song's current pitch class (see ChartNote.midi).
+    TUNED = {"dodge": (0.12, 0.18), "near_miss": (0.2, 0.25), "catch": (0.25, 0.3)}  # volume, duration
+
+    def _tuned(self, kind: str, midi: int):
+        key = (kind, midi)
+        if key not in self.sounds:
+            vol, dur = self.TUNED[kind]
+            hz = 440 * 2 ** ((midi - 69) / 12)
+            try:
+                self.sounds[key] = _tone([hz, hz * 2], dur, vol, 12)
+            except (pygame.error, ValueError):
+                self.sounds[key] = None
+        return self.sounds[key]
+
+    def play(self, kind: str, midi: int = 72) -> None:
+        if not self.enabled:
+            return
+        if kind == "level_up":
+            s = self.sounds.get(("level_up", midi))
+            if s is None and self.sounds:
+                hz = 440 * 2 ** ((midi - 69) / 12)
+                try:
+                    s = self.sounds[("level_up", midi)] = _tone([hz, hz * 1.5, hz * 2], 0.4, 0.3, 7)
+                except (pygame.error, ValueError):
+                    s = None
+        elif kind in self.TUNED:
+            s = self._tuned(kind, midi) if self.sounds else None
+        else:
+            s = self.sounds.get(kind)
+        if s is not None:
             s.play()
