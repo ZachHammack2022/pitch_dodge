@@ -107,3 +107,18 @@ def test_analyse_file_caches(tmp_path, monkeypatch):
 def test_analyse_file_missing(tmp_path):
     with pytest.raises(FileNotFoundError):
         analyse_file(tmp_path / "nope.wav")
+
+
+@pytest.mark.parametrize("workers", [2, 3, 5])
+def test_parallel_hpss_matches_librosa_exactly(workers):
+    import librosa
+
+    from pitch_dodge.analysis import hpss_parallel
+
+    rng = np.random.default_rng(0)
+    y = (sweep(110, 880, 6.0) + 0.1 * rng.standard_normal(int(6.0 * SAMPLE_RATE))).astype(np.float32)
+    mag = np.abs(librosa.stft(y, hop_length=512))
+    h_ref, p_ref = librosa.decompose.hpss(mag)
+    h, p = hpss_parallel(mag, workers=workers)
+    assert h.shape == h_ref.shape
+    assert np.array_equal(h, h_ref) and np.array_equal(p, p_ref)

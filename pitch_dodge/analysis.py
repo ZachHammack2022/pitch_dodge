@@ -134,6 +134,41 @@ def _noop(_: float) -> None:
     pass
 
 
+HPSS_KERNEL = 31  # librosa's default median-filter width, in frames
+HPSS_MAX_WORKERS = 8
+
+
+def hpss_parallel(magnitude: np.ndarray, workers: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """librosa's harmonic/percussive separation, split over time across threads.
+
+    The median filters only look HPSS_KERNEL frames sideways, so chunks padded
+    by more than that give exactly the same result as one big call, several
+    times faster (scipy's filters release the GIL). This is most of the
+    analysis time.
+    """
+    import librosa
+
+    n = magnitude.shape[1]
+    workers = workers or min(os.cpu_count() or 1, HPSS_MAX_WORKERS)
+    pad = HPSS_KERNEL  # comfortably more than the half-width the filters need
+    if workers <= 1 or n < pad * 8:
+        return librosa.decompose.hpss(magnitude, kernel_size=HPSS_KERNEL)
+
+    edges = np.linspace(0, n, workers + 1).astype(int)
+
+    def job(i: int) -> tuple[np.ndarray, np.ndarray]:
+        a, b = edges[i], edges[i + 1]
+        lo, hi = max(0, a - pad), min(n, b + pad)
+        h, p = librosa.decompose.hpss(magnitude[:, lo:hi], kernel_size=HPSS_KERNEL)
+        return h[:, a - lo : b - lo], p[:, a - lo : b - lo]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(workers) as pool:
+        parts = list(pool.map(job, range(workers)))
+    return np.concatenate([h for h, _ in parts], axis=1), np.concatenate([p for _, p in parts], axis=1)
+
+
 def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE, progress: Progress = _noop) -> SongAnalysis:
     """Extract pitch, energy and onsets from a mono signal."""
     import librosa
@@ -142,40 +177,57 @@ def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE, progress: Progress = _n
     if len(y) < HOP_LENGTH * 4:
         raise ValueError("Audio is too short to play (needs at least a fraction of a second).")
 
-    progress(0.12)
-    pitches, mags = librosa.piptrack(y=y, sr=sr, fmin=FMIN, fmax=FMAX, hop_length=HOP_LENGTH)
-    strongest = mags.argmax(axis=0)
-    cols = np.arange(pitches.shape[1])
-    hz = pitches[strongest, cols]
-    mag = mags[strongest, cols]
-    # Quiet frames give junk readings; treat them as unvoiced.
-    voiced = (hz > 0) & (mag > np.percentile(mag, 25))
-    pitch = normalise_pitch(np.where(voiced, hz, np.nan))
+    def track_pitch() -> np.ndarray:
+        pitches, mags = librosa.piptrack(y=y, sr=sr, fmin=FMIN, fmax=FMAX, hop_length=HOP_LENGTH)
+        strongest = mags.argmax(axis=0)
+        cols = np.arange(pitches.shape[1])
+        hz = pitches[strongest, cols]
+        mag = mags[strongest, cols]
+        # Quiet frames give junk readings; treat them as unvoiced.
+        voiced = (hz > 0) & (mag > np.percentile(mag, 25))
+        return normalise_pitch(np.where(voiced, hz, np.nan))
 
-    progress(0.3)
+    def track_beat() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+        onsets = librosa.onset.onset_detect(
+            onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time"
+        )
+        _, beats = librosa.beat.beat_track(
+            onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time"
+        )
+        return onset_env, onsets, beats
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    progress(0.1)
+    # Pitch and beat tracking run alongside the (also threaded) harmonic/percussive split.
+    with ThreadPoolExecutor(2) as pool:
+        pitch_job = pool.submit(track_pitch)
+        beat_job = pool.submit(track_beat)
+
+        # Split into harmonic (sustained: melody, chords) and percussive (drums) parts.
+        magnitude = np.abs(librosa.stft(y, hop_length=HOP_LENGTH))
+        progress(0.2)
+        harmonic, percussive = hpss_parallel(magnitude)
+        progress(0.55)
+        harm_env = librosa.onset.onset_strength(
+            S=librosa.amplitude_to_db(harmonic, ref=np.max), sr=sr, hop_length=HOP_LENGTH
+        )
+        perc_env = librosa.onset.onset_strength(
+            S=librosa.amplitude_to_db(percussive, ref=np.max), sr=sr, hop_length=HOP_LENGTH
+        )
+        progress(0.65)
+        chroma = librosa.feature.chroma_stft(S=harmonic**2, sr=sr, hop_length=HOP_LENGTH)
+        pitch_class = chroma.argmax(axis=0)
+        progress(0.75)
+        onset_env, onsets, beats = beat_job.result()
+        progress(0.85)
+        pitch = pitch_job.result()
+
+    progress(0.95)
     rms = librosa.feature.rms(y=y, hop_length=HOP_LENGTH)[0]
     n = min(len(pitch), len(rms))
     energy = normalise_energy(rms[:n])
-
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
-    onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
-    progress(0.38)
-    _, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
-
-    # Split into harmonic (sustained: melody, chords) and percussive (drums) parts.
-    progress(0.45)
-    stft = librosa.stft(y, hop_length=HOP_LENGTH)
-    harmonic, percussive = librosa.decompose.hpss(stft)
-    progress(0.88)
-    harm_env = librosa.onset.onset_strength(
-        S=librosa.amplitude_to_db(np.abs(harmonic), ref=np.max), sr=sr, hop_length=HOP_LENGTH
-    )
-    perc_env = librosa.onset.onset_strength(
-        S=librosa.amplitude_to_db(np.abs(percussive), ref=np.max), sr=sr, hop_length=HOP_LENGTH
-    )
-    progress(0.95)
-    chroma = librosa.feature.chroma_stft(S=np.abs(harmonic) ** 2, sr=sr, hop_length=HOP_LENGTH)
-    pitch_class = chroma.argmax(axis=0)
 
     def fit(a):
         a = np.asarray(a, dtype=float)[:n]

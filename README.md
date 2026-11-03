@@ -65,7 +65,7 @@ for downloads and limits how many you can make.
 | `--no-browser` | don't open a tab automatically |
 | `--host 0.0.0.0` | let other devices on your Wi-Fi play at `http://<your-mac>.local:8000` |
 
-Each song is analysed once (15–20 seconds) and cached in `~/.cache/pitch_dodge`.
+Each song is analysed once (around 10 seconds; faster with more CPU cores) and cached in `~/.cache/pitch_dodge`.
 The server starts analysing every song in `songs/` in the background as soon
 as it starts, and the song list shows which are ready. If you pick one that
 isn't ready yet, a progress bar shows how far along it is. High scores are
