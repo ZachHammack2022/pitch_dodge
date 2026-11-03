@@ -27,6 +27,24 @@ flac onto the page. It's copied to `~/.local/share/pitch_dodge/songs`, and you
 can also drop files into that folder directly. Stop the server with
 **Ctrl+C**.
 
+### Getting free music
+
+`pitch-dodge fetch` downloads freely licensed recordings (by default
+[Musopen](https://musopen.org)'s public-domain classical recordings) from the
+[Internet Archive](https://archive.org) straight into your song library:
+
+```bash
+.venv/bin/pitch-dodge fetch                         # 10 tracks
+.venv/bin/pitch-dodge fetch --query "chopin" -n 5   # search for something specific
+.venv/bin/pitch-dodge fetch --dry-run               # just list what it would get
+```
+
+It only keeps items labelled public domain or Creative Commons, picks tracks
+between 1 and 8 minutes long (`--min-minutes` / `--max-minutes`), skips files
+you already have, and records each track's source and license in `CREDITS.md`
+in the songs folder. It doesn't use musopen.org itself, which needs an account
+for downloads and limits how many you can make.
+
 `./play.sh` passes options through to `pitch-dodge serve`:
 
 | Option | |

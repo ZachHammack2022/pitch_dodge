@@ -72,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "serve":
         return serve_main(argv[1:])
+    if argv and argv[0] == "fetch":
+        from .fetch import main as fetch_main
+
+        return fetch_main(argv[1:])
     args = parse_args(argv)
     if not Path(args.song).is_file():
         print(f"pitch-dodge: file not found: {args.song}", file=sys.stderr)
