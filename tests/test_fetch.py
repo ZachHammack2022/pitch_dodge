@@ -122,3 +122,42 @@ def test_fetch_reports_when_nothing_found(tmp_path):
     lines = []
     fetch(limit=5, dest=tmp_path, delay=0, get=archive, log=lines.append)
     assert "--allow-unlabeled" in lines[-1]
+
+
+def test_ssl_context_uses_os_trust_store(monkeypatch):
+    import ssl
+
+    import truststore
+
+    from pitch_dodge.fetch import ssl_context
+
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    ctx = ssl_context()
+    assert isinstance(ctx, truststore.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED  # still verifying, just with the OS's certificates
+
+
+def test_ssl_cert_file_overrides(monkeypatch):
+    import ssl
+
+    from pitch_dodge.fetch import ssl_context
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent.pem")
+    ctx = ssl_context()
+    assert type(ctx) is ssl.SSLContext
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_certificate_error_message_explains_fix():
+    import ssl
+    import urllib.error
+
+    from pitch_dodge.fetch import explain_connection_error
+
+    err = urllib.error.URLError(
+        ssl.SSLCertVerificationError(1, "self signed certificate in certificate chain")
+    )
+    msg = explain_connection_error(err)
+    assert "truststore" in msg and "SSL_CERT_FILE" in msg
+    plain = explain_connection_error(urllib.error.URLError("timed out"))
+    assert "truststore" not in plain

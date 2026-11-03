@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -60,10 +61,53 @@ def license_kind(url: str | None) -> str | None:
 # ---------------------------------------------------------------- API
 
 
+def ssl_context() -> ssl.SSLContext:
+    """Verify certificates against the operating system's trust store.
+
+    Python normally uses its own bundle of certificates and ignores the macOS
+    Keychain / Windows certificate store. On networks that inspect HTTPS (work
+    VPNs, corporate proxies, some antivirus) the proxy's certificate is only in
+    the OS store, so Python rejects every connection. ``truststore`` makes it
+    trust what the browser trusts. ``SSL_CERT_FILE`` still works as an override.
+    """
+    import os
+
+    if not os.environ.get("SSL_CERT_FILE"):
+        try:
+            import truststore
+
+            return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except ImportError:
+            pass
+    return ssl.create_default_context()
+
+
+_CONTEXT: ssl.SSLContext | None = None
+
+
 def http_get(url: str, timeout: float = 60) -> bytes:
+    global _CONTEXT
+    if _CONTEXT is None:
+        _CONTEXT = ssl_context()
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_CONTEXT) as r:
         return r.read()
+
+
+def explain_connection_error(exc: urllib.error.URLError) -> str:
+    reason = exc.reason
+    msg = f"pitch-dodge: couldn't reach archive.org ({reason})"
+    if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(reason):
+        msg += (
+            "\n\nSomething on your network (a VPN, corporate proxy or antivirus) is intercepting"
+            "\nHTTPS with a certificate Python doesn't trust. Fixes, in order:"
+            "\n  1. Re-run ./setup.sh so the 'truststore' package is installed; it makes Python"
+            "\n     trust the same certificates as your browser."
+            "\n  2. Or point Python at your network's root certificate:"
+            "\n       SSL_CERT_FILE=/path/to/company-root.pem .venv/bin/pitch-dodge fetch"
+            "\n  3. Or try again off the VPN / on another network."
+        )
+    return msg
 
 
 def search(query: str, get: Getter, page_size: int = 50, max_pages: int = 20) -> Iterator[dict]:
@@ -315,7 +359,7 @@ def main(argv: list[str]) -> int:
             dry_run=a.dry_run,
         )
     except urllib.error.URLError as exc:
-        print(f"pitch-dodge: couldn't reach archive.org ({exc.reason})")
+        print(explain_connection_error(exc))
         return 1
     except KeyboardInterrupt:
         print("\nStopped.")
