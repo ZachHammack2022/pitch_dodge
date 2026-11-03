@@ -1,8 +1,13 @@
 __pycache__/
 *.pyc
-*.wav
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
 .env
 *.log
 .idea/
 .vscode/
-*.DS_Store
+.DS_Store
