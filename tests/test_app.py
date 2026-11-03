@@ -104,3 +104,8 @@ def test_latency_shifts_game_time_behind_audio(song, tmp_path):
 
 def test_cli_latency_flag():
     assert parse_args(["--latency-ms", "180"]).latency_ms == 180
+
+
+def test_cli_reduce_motion_flag():
+    assert parse_args(["--reduce-motion"]).reduce_motion is True
+    assert parse_args([]).reduce_motion is False

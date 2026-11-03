@@ -72,6 +72,7 @@ class Renderer:
         self.flash = 0.0
         self._glow_cache: dict[tuple, pygame.Surface] = {}
         self.rng = random.Random()
+        self.reduced_motion = False  # no screen shake or red flash on hits
 
     # ------------------------------------------------------------ helpers
 
@@ -124,8 +125,9 @@ class Renderer:
         for e in events:
             if e.kind == "hit":
                 self._burst(e.x, e.y, DANGER, 40, 420, life=0.8, size=4)
-                self.shake = 0.35
-                self.flash = 0.25
+                if not self.reduced_motion:
+                    self.shake = 0.35
+                    self.flash = 0.25
                 self.popups.append(Popup("OUCH", e.x - 110, e.y - 20, 0.8, DANGER))
             elif e.kind == "perfect":
                 self._burst(e.x, e.y, GOLD, 18, 240)

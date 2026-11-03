@@ -166,6 +166,9 @@
 
   // ------------------------------------------------------------ drawing
 
+  // Respect "Reduce motion" (macOS: System Settings > Accessibility > Display): no shake or flash.
+  const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   const COLORS = {
     text: '#ebebf5', dim: '#8c87aa', accent: '#78ffaa', danger: '#ff5064', gold: '#ffd25a',
   };
@@ -242,8 +245,7 @@
       for (const e of events) {
         if (e.kind === 'hit') {
           this.burst(e.x, e.y, COLORS.danger, 40, 420, 0.8, 4);
-          this.shake = 0.35;
-          this.flash = 0.25;
+          if (!REDUCED_MOTION) { this.shake = 0.35; this.flash = 0.25; }
           this.popups.push({ text: 'OUCH', x: e.x - 110, y: e.y - 20, life: 0.8, color: COLORS.danger });
         } else if (e.kind === 'perfect') {
           this.burst(e.x, e.y, COLORS.gold, 18, 240);
@@ -751,6 +753,21 @@
     refreshBest();
   }
 
+  /** The top scores for this song and difficulty, with this run highlighted. */
+  function renderBoard(top, rank) {
+    const ol = $('results-board');
+    ol.innerHTML = '';
+    top.forEach((e, i) => {
+      const li = document.createElement('li');
+      if (i + 1 === rank) li.className = 'you';
+      li.innerHTML = '<span></span><span></span><span></span>';
+      li.children[0].textContent = e.score.toLocaleString();
+      li.children[1].textContent = e.cleared ? 'cleared' : '';
+      li.children[2].textContent = e.date;
+      ol.appendChild(li);
+    });
+  }
+
   async function finish() {
     const w = state.world;
     audio.stop();
@@ -782,6 +799,7 @@
       $('results-rank').textContent = res.rank === 1 ? 'NEW HIGH SCORE!'
         : res.rank ? `#${res.rank} on the board (best ${state.best.toLocaleString()})`
         : `best ${state.best.toLocaleString()}`;
+      renderBoard(res.top, res.rank);
     } catch (e) { /* offline scores are fine */ }
   }
 

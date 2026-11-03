@@ -108,7 +108,9 @@ Switching to another tab or window pauses the game.
 - The purple line is the melody path through the upcoming notes; faint
   vertical lines are the beats coming toward you.
 - Quiet parts of a song are calmer; loud parts fill in more of the beat.
-- Top 5 scores are kept per song and difficulty in
+- If "Reduce motion" is on in your Mac's accessibility settings, hits don't
+  shake or flash the screen (desktop: `--reduce-motion`).
+- Top 5 scores are kept per song and difficulty (shown after each run) in
   `~/.local/share/pitch_dodge/scores.json`.
 
 | Difficulty | Lives | Notes land on | Hazards |

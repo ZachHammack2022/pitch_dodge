@@ -33,6 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-d", "--difficulty", choices=list(DIFFICULTIES), default="normal", help="starting difficulty"
     )
     parser.add_argument("--mute", action="store_true", help="play without sound")
+    parser.add_argument("--reduce-motion", action="store_true", help="no screen shake or flash on hits")
     parser.add_argument(
         "--latency-ms",
         type=float,
@@ -97,7 +98,9 @@ def main(argv: list[str] | None = None) -> int:
     from .app import App  # imported late so --help is instant
 
     try:
-        App(args.song, difficulty=args.difficulty, mute=args.mute, latency_ms=args.latency_ms).run()
+        app = App(args.song, difficulty=args.difficulty, mute=args.mute, latency_ms=args.latency_ms)
+        app.renderer.reduced_motion = args.reduce_motion
+        app.run()
     except KeyboardInterrupt:
         pass
     except ValueError as exc:  # e.g. a song too short to play
