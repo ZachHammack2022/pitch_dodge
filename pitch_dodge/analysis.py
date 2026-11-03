@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -126,7 +127,14 @@ def normalise_energy(rms: np.ndarray) -> np.ndarray:
     return np.clip(rms / peak, 0.0, 1.0)
 
 
-def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE) -> SongAnalysis:
+Progress = Callable[[float], None]  # called with 0..1 as analysis goes on
+
+
+def _noop(_: float) -> None:
+    pass
+
+
+def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE, progress: Progress = _noop) -> SongAnalysis:
     """Extract pitch, energy and onsets from a mono signal."""
     import librosa
 
@@ -134,6 +142,7 @@ def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE) -> SongAnalysis:
     if len(y) < HOP_LENGTH * 4:
         raise ValueError("Audio is too short to play (needs at least a fraction of a second).")
 
+    progress(0.12)
     pitches, mags = librosa.piptrack(y=y, sr=sr, fmin=FMIN, fmax=FMAX, hop_length=HOP_LENGTH)
     strongest = mags.argmax(axis=0)
     cols = np.arange(pitches.shape[1])
@@ -143,23 +152,28 @@ def analyse_signal(y: np.ndarray, sr: int = SAMPLE_RATE) -> SongAnalysis:
     voiced = (hz > 0) & (mag > np.percentile(mag, 25))
     pitch = normalise_pitch(np.where(voiced, hz, np.nan))
 
+    progress(0.3)
     rms = librosa.feature.rms(y=y, hop_length=HOP_LENGTH)[0]
     n = min(len(pitch), len(rms))
     energy = normalise_energy(rms[:n])
 
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
     onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
+    progress(0.38)
     _, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time")
 
     # Split into harmonic (sustained: melody, chords) and percussive (drums) parts.
+    progress(0.45)
     stft = librosa.stft(y, hop_length=HOP_LENGTH)
     harmonic, percussive = librosa.decompose.hpss(stft)
+    progress(0.88)
     harm_env = librosa.onset.onset_strength(
         S=librosa.amplitude_to_db(np.abs(harmonic), ref=np.max), sr=sr, hop_length=HOP_LENGTH
     )
     perc_env = librosa.onset.onset_strength(
         S=librosa.amplitude_to_db(np.abs(percussive), ref=np.max), sr=sr, hop_length=HOP_LENGTH
     )
+    progress(0.95)
     chroma = librosa.feature.chroma_stft(S=np.abs(harmonic) ** 2, sr=sr, hop_length=HOP_LENGTH)
     pitch_class = chroma.argmax(axis=0)
 
@@ -198,7 +212,17 @@ def _file_digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def analyse_file(path: str | os.PathLike, cache_dir: Path | None = None) -> SongAnalysis:
+def cache_path(path: str | os.PathLike, cache_dir: Path | None = None) -> Path:
+    return (cache_dir or default_cache_dir()) / f"{_file_digest(Path(path))}.npz"
+
+
+def is_cached(path: str | os.PathLike, cache_dir: Path | None = None) -> bool:
+    return not os.environ.get("PITCH_DODGE_NO_CACHE") and cache_path(path, cache_dir).exists()
+
+
+def analyse_file(
+    path: str | os.PathLike, cache_dir: Path | None = None, progress: Progress = _noop
+) -> SongAnalysis:
     """Analyse an audio file (anything librosa can read: wav, mp3, ogg, flac...).
 
     Pass ``cache_dir=None`` to use the default cache, or a path to use another.
@@ -211,7 +235,7 @@ def analyse_file(path: str | os.PathLike, cache_dir: Path | None = None) -> Song
     use_cache = not os.environ.get("PITCH_DODGE_NO_CACHE")
     cache_file = None
     if use_cache:
-        cache_file = (cache_dir or default_cache_dir()) / f"{_file_digest(path)}.npz"
+        cache_file = cache_path(path, cache_dir)
         if cache_file.exists():
             try:
                 with np.load(cache_file) as data:
@@ -224,8 +248,9 @@ def analyse_file(path: str | os.PathLike, cache_dir: Path | None = None) -> Song
 
     import librosa
 
+    progress(0.02)
     y, sr = librosa.load(str(path), sr=SAMPLE_RATE, mono=True)
-    result = analyse_signal(y, sr)
+    result = analyse_signal(y, sr, progress)
 
     if cache_file is not None:
         try:

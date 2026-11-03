@@ -203,13 +203,17 @@ class Renderer:
             if n.kind != "catch":
                 continue
             x = world.x_at(n.t, t)
-            if x > px + 40:
+            if world.x_at(n.t + n.duration, t) > px + 40:
                 continue
             pts.append((x, pitch_to_y(n.pitch)))
+            if n.duration > 0:  # the paddle stays put through a hold
+                pts.append((world.x_at(n.t + n.duration, t), pitch_to_y(n.pitch)))
             if x < -40:
                 break
         if len(pts) > 1:
+            self.screen.set_clip(pygame.Rect(0, TOP_MARGIN, int(px + world.paddle.width / 2), HEIGHT))
             pygame.draw.lines(self.screen, (90, 70, 160), False, pts, 2)
+            self.screen.set_clip(None)
 
         # Emitter: the pitch of what's arriving one travel time from now.
         ahead = t + world.chart.travel_time
@@ -233,6 +237,21 @@ class Renderer:
         pygame.draw.polygon(self.screen, DANGER, pts)
         pygame.draw.circle(self.screen, (40, 8, 18), (int(x), int(y)), max(2, int(r * 0.32)))
 
+    def _draw_hold_tail(self, world: World, n, color) -> None:
+        """A bar from the head back along the time the note is held for."""
+        x_end = n.x - n.duration * world.speed
+        x_start = min(n.x, world.paddle.x + world.paddle.width / 2) if n.holding else n.x
+        if x_start <= x_end:
+            return
+        live = n.holding and not n.hold_broken
+        dead = n.passed and not n.hit  # head was missed
+        alpha = 70 if dead else (220 if live else 130)
+        h = int(n.radius * (1.2 if live else 0.9))
+        bar = pygame.Surface((int(x_start - x_end) + 1, h), pygame.SRCALPHA)
+        c = (140, 135, 170) if dead else color
+        bar.fill((*c, alpha))
+        self.screen.blit(bar, (int(x_end), int(n.y - h / 2)))
+
     def draw_world(self, world: World) -> None:
         # Notes, with a short trail. Hazards are red spiked shapes.
         for n in world.notes:
@@ -240,6 +259,10 @@ class Renderer:
                 self._draw_hazard(n.x, n.y, n.radius * 1.4, world.song_time)
                 continue
             color = pitch_color(n.pitch)
+            if n.is_hold:
+                self._draw_hold_tail(world, n, color)
+            if n.hit:
+                continue  # head already caught; only the tail is left
             for i in range(1, 4):
                 tx = n.x - i * n.radius * 0.9
                 ty = n.y
@@ -382,10 +405,11 @@ class Renderer:
             ("missed", f"{world.missed}"),
             ("accuracy", f"{world.accuracy * 100:.0f}%"),
             ("hazards hit", f"{world.hits}"),
+            ("holds", f"{world.holds_completed} / {world.holds}"),
             ("best combo", f"{world.best_streak}"),
             ("song", f"{world.progress * 100:.0f}%"),
         ]
-        y = 310
+        y = 300
         for label, value in rows:
             self.text(self.font, label, DIM, topright=(WIDTH / 2 - 16, y))
             self.text(self.font, value, TEXT, topleft=(WIDTH / 2 + 16, y))

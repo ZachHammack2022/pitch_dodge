@@ -194,3 +194,49 @@ def test_beat_pulse():
     assert beat_pulse(beats, 1.0) == pytest.approx(1.0)  # downbeat
     assert beat_pulse(beats, 1.5) == pytest.approx(0.6)  # off-beat is softer
     assert beat_pulse(beats, 1.4) < 0.05  # decayed before the next beat
+
+
+def test_pointer_moves_paddle_toward_target_with_speed_cap():
+    from pitch_dodge.config import POINTER_SPEED
+
+    w = world([])
+    start = w.paddle.y
+    w.update(0.1, 0.1, 0, target_y=start - 1000)  # far away: capped
+    assert w.paddle.y == pytest.approx(start - POINTER_SPEED * 0.1)
+    w.update(0.2, 0.1, 0, target_y=w.paddle.y + 20)  # close: lands exactly
+    assert w.paddle.y == pytest.approx(start - POINTER_SPEED * 0.1 + 20)
+    w.update(5, 5, 0, target_y=10_000)
+    assert w.paddle.bottom == pytest.approx(HEIGHT)  # still clamped to the screen
+
+
+def test_hold_note_scores_while_held_and_bonus_at_end():
+    from pitch_dodge.world import POINTS_HOLD_BONUS, POINTS_HOLD_PER_SECOND
+
+    w = world([])
+    w.chart.notes.append(ChartNote(1.0, paddle_pitch(w), duration=1.0, midi=74))
+    events = run(w, 2.5)
+    kinds = [e.kind for e in events if e.kind != "spawn"]
+    assert kinds == ["perfect", "hold_start", "hold_done"]
+    expected = POINTS_PERFECT + POINTS_HOLD_PER_SECOND * 1.0 + POINTS_HOLD_BONUS
+    assert w.score == pytest.approx(expected, abs=1)
+    assert (w.holds, w.holds_completed) == (1, 1)
+    assert not w.notes
+
+
+def test_slipping_off_a_hold_breaks_it():
+    w = world([])
+    w.chart.notes.append(ChartNote(1.0, paddle_pitch(w), duration=1.0))
+    events = run(w, 1.3)
+    events += run(w, 2.5, direction=-1)  # move away mid-hold
+    kinds = [e.kind for e in events if e.kind != "spawn"]
+    assert "hold_break" in kinds and "hold_done" not in kinds
+    assert w.holds_completed == 0
+    assert w.score < POINTS_PERFECT + 20  # got some tail points, not all
+
+
+def test_missed_hold_head_gives_nothing():
+    w = world([(1.0, 0.0)])
+    w.chart.notes[0] = ChartNote(1.0, 0.0, duration=1.0)
+    events = run(w, 2.5)
+    assert [e.kind for e in events if e.kind != "spawn"] == ["miss"]
+    assert w.score == 0

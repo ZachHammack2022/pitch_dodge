@@ -41,6 +41,7 @@ class App:
         self.max_frames = max_frames
         self.autoplay = autoplay  # a simple bot, for demos and smoke tests
         self.start_playing = start_playing
+        self.pointer_y: float | None = None  # last mouse height; None = keyboard control
         self.latency = latency_ms / 1000  # how late the player hears the music (e.g. Bluetooth)
 
         pygame.init()
@@ -64,11 +65,15 @@ class App:
     # ------------------------------------------------------------ setup
 
     def _load(self) -> None:
-        self.renderer.screen.blit(self.renderer.background, (0, 0))
-        self.renderer.draw_message("analysing...", self.song_name)
-        pygame.display.flip()
-        pygame.event.pump()
-        self.song = analyse_file(self.song_path)
+        def show(fraction: float) -> None:
+            self.renderer.screen.blit(self.renderer.background, (0, 0))
+            label = f"analysing... {fraction * 100:.0f}%" if fraction < 1 else "loading..."
+            self.renderer.draw_message(label, f"{self.song_name}  (only the first time)")
+            pygame.display.flip()
+            pygame.event.pump()
+
+        show(0.0)
+        self.song = analyse_file(self.song_path, progress=show)
         self.player = open_player(self.song_path, self.song.duration, mute=self.mute)
         self.sfx = Sfx(enabled=self.player.audible)
         self.state = "title"
@@ -107,6 +112,9 @@ class App:
     def _handle_event(self, e: pygame.event.Event) -> None:
         if e.type == pygame.QUIT:
             self.running = False
+            return
+        if e.type == pygame.MOUSEMOTION:
+            self.pointer_y = float(e.pos[1])  # SCALED mode reports logical coordinates
             return
         if e.type != pygame.KEYDOWN:
             return
@@ -154,6 +162,8 @@ class App:
         keys = pygame.key.get_pressed()
         up = keys[pygame.K_UP] or keys[pygame.K_w]
         down = keys[pygame.K_DOWN] or keys[pygame.K_s]
+        if up or down:
+            self.pointer_y = None  # keys take over from the mouse until it moves again
         return float(down) - float(up)
 
     def _bot_direction(self) -> float:
@@ -195,7 +205,9 @@ class App:
             w = self.world
             song_time = self.song_clock.position() - self.latency
             dt = min(max(song_time - w.song_time, 0.0), MAX_FRAME)
-            events = w.update(song_time, dt, self._direction())
+            direction = self._direction()
+            target = None if self.autoplay else self.pointer_y
+            events = w.update(song_time, dt, direction, target_y=target)
             self.renderer.react(events)
             for e in events:
                 self.sfx.play(e.kind, e.midi or 72)

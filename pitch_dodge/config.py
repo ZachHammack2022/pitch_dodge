@@ -15,7 +15,8 @@ SPAWN_MARGIN = 30
 
 PADDLE_WIDTH = 14
 PADDLE_X = WIDTH - 110
-PADDLE_SPEED = 560.0  # px/s
+PADDLE_SPEED = 560.0  # px/s with the keyboard
+POINTER_SPEED = 1500.0  # px/s cap when following the mouse / trackpad / touch
 NOTE_RADIUS = 9
 
 

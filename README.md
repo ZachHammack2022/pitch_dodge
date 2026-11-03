@@ -65,8 +65,10 @@ for downloads and limits how many you can make.
 | `--no-browser` | don't open a tab automatically |
 | `--host 0.0.0.0` | let other devices on your Wi-Fi play at `http://<your-mac>.local:8000` |
 
-The first time a song is played it's analysed (a few seconds); the result is
-cached in `~/.cache/pitch_dodge`, so it's instant after that. High scores are
+Each song is analysed once (15–20 seconds) and cached in `~/.cache/pitch_dodge`.
+The server starts analysing every song in `songs/` in the background as soon
+as it starts, and the song list shows which are ready. If you pick one that
+isn't ready yet, a progress bar shows how far along it is. High scores are
 saved by the server, so they're shared between browsers and with the desktop
 version.
 
@@ -83,7 +85,8 @@ The original pygame window still works:
 
 | Key | Action |
 | --- | --- |
-| ↑ / ↓ or W / S | move the paddle (on the menu: pick a song) |
+| mouse / trackpad / touch | move the paddle: it follows your pointer up and down |
+| ↑ / ↓ or W / S | move the paddle with the keyboard (on the menu: pick a song) |
 | ← / → on the menu | choose difficulty |
 | Space / Enter | start |
 | P or Esc | pause (R restart, Q back to menu) |
@@ -92,6 +95,9 @@ The original pygame window still works:
 
 Switching to another tab or window pauses the game.
 
+- **Hold notes**: when the melody sustains a note, it trails a bar. Catch the head
+  and keep the paddle on the bar for points while it plays (with a sustained
+  tone), plus a bonus for holding all the way.
 - **Catch** the glowing notes: each scores **10**, or **15** for a PERFECT
   (caught near the middle of the paddle), times your multiplier.
 - Every 10 catches in a row raises the **multiplier** (up to ×8). Missing a

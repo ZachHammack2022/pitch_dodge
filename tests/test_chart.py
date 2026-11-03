@@ -172,3 +172,41 @@ def test_intensity_curve():
     assert curve[10] < 0.1 and curve[-10] > 0.9
     flat = intensity(make_song(duration=10))
     assert np.allclose(flat, 1.0)  # a song with no quiet parts plays at full intensity
+
+
+def test_sustained_notes_become_holds():
+    from pitch_dodge.chart import HOLD_MAX, HOLD_RELEASE, find_holds
+
+    # A steady tone: room of 2 s between notes -> holds lasting until just before the next.
+    song = make_song(duration=12, energy=0.6, pitch=0.5)
+    holds = find_holds(song, [1.0, 3.0, 3.4, 8.0])
+    assert holds[0] == pytest.approx(2.0 - HOLD_RELEASE, abs=0.03)
+    assert holds[1] == 0.0  # next note too close
+    assert holds[2] == pytest.approx(HOLD_MAX, abs=0.03)  # capped
+    assert holds[3] > 0  # last note holds into the end of the song
+
+
+def test_hold_ends_when_pitch_moves_or_sound_dies():
+    from pitch_dodge.chart import find_holds
+
+    moving = make_song(duration=6, pitch=lambda t: 0.5 if t < 1.8 else 0.8, energy=0.6)
+    assert find_holds(moving, [1.0, 4.0])[0] == pytest.approx(0.8, abs=0.05)
+    dying = make_song(duration=6, energy=lambda t: 0.6 if t < 1.3 else 0.05)
+    assert find_holds(dying, [1.0, 4.0])[0] == 0.0  # too short to be worth holding
+
+
+def test_charts_include_holds_and_hazards_avoid_them():
+    song = make_song(
+        duration=30,
+        beats=np.arange(0.5, 30, 0.5),
+        energy=0.6,
+        harmonic=lambda t: 1.0 if (t % 3) < 0.05 else 0.0,  # a melody note every 3 s, sustained
+        percussive=lambda t: 1.0 if (t % 0.5) < 0.05 else 0.0,
+    )
+    chart = build_chart(song, DIFFICULTIES["normal"])
+    holds = [n for n in catches(chart) if n.duration > 0]
+    assert holds
+    for h in hazards(chart):
+        for n in holds:
+            if n.t <= h.t <= n.t + n.duration:
+                assert abs(h.pitch - n.pitch) >= 0.3
