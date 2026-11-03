@@ -55,6 +55,7 @@ class Popup:
     y: float
     life: float
     color: tuple[int, int, int]
+    judge: bool = False
 
 
 class Renderer:
@@ -126,15 +127,23 @@ class Renderer:
                 self.shake = 0.35
                 self.flash = 0.25
                 self.popups.append(Popup("OUCH", e.x - 110, e.y - 20, 0.8, DANGER))
-            elif e.kind == "near_miss":
-                self._burst(e.x, e.y, GOLD, 14, 220)
-                self.popups.append(Popup(f"CLOSE! +{e.value}", e.x - 150, e.y - 24, 0.8, GOLD))
-            elif e.kind == "dodge":
-                self._burst(e.x, e.y, ACCENT, 6, 140, life=0.4, size=2)
+            elif e.kind == "perfect":
+                self._burst(e.x, e.y, GOLD, 18, 240)
+                self._judge(f"PERFECT +{e.value}", e.x - 170, e.y - 26, GOLD)
+            elif e.kind == "catch":
+                self._burst(e.x, e.y, ACCENT, 10, 180, life=0.5, size=3)
+            elif e.kind == "miss":
+                self._burst(e.x, e.y, DIM, 6, 80, life=0.4, size=2)
+                self._judge("miss", e.x - 70, e.y - 20, DIM)
             elif e.kind == "level_up":
                 self.popups.append(Popup(f"x{e.value}!", WIDTH / 2 - 30, HEIGHT / 2 - 40, 1.0, ACCENT))
             elif e.kind == "spawn":
                 self._burst(6, e.y, TEXT, 4, 90, life=0.3, size=2)
+
+    def _judge(self, text, x, y, color) -> None:
+        """Catch/miss labels replace each other instead of piling up."""
+        self.popups = [p for p in self.popups if not p.judge]
+        self.popups.append(Popup(text, x, y, 0.45, color, judge=True))
 
     def tick(self, dt: float) -> None:
         for p in self.particles:
@@ -188,13 +197,17 @@ class Renderer:
                 )
         self.screen.blit(lines, (0, 0))
 
-        # The melody coming toward the player: whatever is at x now will reach
-        # the paddle at song time t + (PADDLE_X - x) / speed.
+        # The melody path: a line through the upcoming catch notes, where they will be.
         pts = []
-        for x in range(0, int(px) + 1, 8):
-            s = t + (px - x) / speed
-            if 0 <= s <= world.duration:
-                pts.append((x, pitch_to_y(song.pitch_at(s))))
+        for n in world.chart.notes:
+            if n.kind != "catch":
+                continue
+            x = world.x_at(n.t, t)
+            if x > px + 40:
+                continue
+            pts.append((x, pitch_to_y(n.pitch)))
+            if x < -40:
+                break
         if len(pts) > 1:
             pygame.draw.lines(self.screen, (90, 70, 160), False, pts, 2)
 
@@ -208,9 +221,24 @@ class Renderer:
         if t < 0:  # count-in
             self.text(self.font_big, str(int(-t) + 1), TEXT, center=(WIDTH / 2, HEIGHT / 2), alpha=150)
 
+    def _draw_hazard(self, x: float, y: float, r: float, t: float) -> None:
+        spin = t * 3
+        pts = []
+        for i in range(16):
+            a = spin + i * math.tau / 16
+            rr = r * (1.0 if i % 2 == 0 else 0.5)
+            pts.append((x + math.cos(a) * rr, y + math.sin(a) * rr))
+        g = self._glow(DANGER, int(r * 0.6))
+        self.screen.blit(g, g.get_rect(center=(int(x), int(y))))
+        pygame.draw.polygon(self.screen, DANGER, pts)
+        pygame.draw.circle(self.screen, (40, 8, 18), (int(x), int(y)), max(2, int(r * 0.32)))
+
     def draw_world(self, world: World) -> None:
-        # Notes, with a short trail.
+        # Notes, with a short trail. Hazards are red spiked shapes.
         for n in world.notes:
+            if n.kind == "hazard":
+                self._draw_hazard(n.x, n.y, n.radius * 1.4, world.song_time)
+                continue
             color = pitch_color(n.pitch)
             for i in range(1, 4):
                 tx = n.x - i * n.radius * 0.9
@@ -251,7 +279,7 @@ class Renderer:
         self.text(self.font_mid, f"{world.score:,}", TEXT, topleft=(16, 10))
         mult_color = ACCENT if world.multiplier > 1 else DIM
         self.text(self.font, f"x{world.multiplier}", mult_color, topleft=(190, 18))
-        self.text(self.font_small, f"streak {world.streak}", DIM, topleft=(240, 22))
+        self.text(self.font_small, f"combo {world.streak}", DIM, topleft=(240, 22))
         if best:
             self.text(self.font_small, f"best {best:,}", DIM, topleft=(360, 22))
         if muted:
@@ -304,7 +332,7 @@ class Renderer:
             self.screen.blit(g, g.get_rect(center=(int(x), int(y))))
 
         self.text(self.font_big, "PITCH DODGE", TEXT, center=(WIDTH / 2, 130))
-        self.text(self.font, "dodge the melody", DIM, center=(WIDTH / 2, 185))
+        self.text(self.font, "catch the melody, dodge the drums", DIM, center=(WIDTH / 2, 185))
         self.text(self.font, f"song: {song}", TEXT, center=(WIDTH / 2, 250))
 
         y = 300
@@ -349,16 +377,15 @@ class Renderer:
         else:
             self.text(self.font, f"best {best:,}", DIM, center=(WIDTH / 2, 270))
 
-        total = world.dodged + world.hits
-        accuracy = 100 * world.dodged / total if total else 0
         rows = [
-            ("dodged", f"{world.dodged}"),
-            ("hits", f"{world.hits}"),
-            ("accuracy", f"{accuracy:.0f}%"),
-            ("best streak", f"{world.best_streak}"),
+            ("caught", f"{world.caught}  ({world.perfect} perfect)"),
+            ("missed", f"{world.missed}"),
+            ("accuracy", f"{world.accuracy * 100:.0f}%"),
+            ("hazards hit", f"{world.hits}"),
+            ("best combo", f"{world.best_streak}"),
             ("song", f"{world.progress * 100:.0f}%"),
         ]
-        y = 320
+        y = 310
         for label, value in rows:
             self.text(self.font, label, DIM, topright=(WIDTH / 2 - 16, y))
             self.text(self.font, value, TEXT, topleft=(WIDTH / 2 + 16, y))

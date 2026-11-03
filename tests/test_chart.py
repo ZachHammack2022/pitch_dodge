@@ -85,3 +85,61 @@ def test_notes_carry_the_songs_pitch_class():
     song.pitch_class[:] = 7  # G throughout
     chart = build_chart(song, DIFFICULTIES["normal"])
     assert {n.midi for n in chart.notes} == {79}
+
+
+def catches(chart):
+    return [n for n in chart.notes if n.kind == "catch"]
+
+
+def hazards(chart):
+    return [n for n in chart.notes if n.kind == "hazard"]
+
+
+def test_melody_makes_catch_notes_and_drums_make_hazards():
+    # Drums hit hard on every 4th beat; harmonic activity everywhere.
+    song = make_song(
+        duration=30,
+        beats=BEATS_120,
+        harmonic=0.6,
+        percussive=lambda t: 1.0 if abs((t - 0.5) / 2.0 - round((t - 0.5) / 2.0)) < 0.01 else 0.1,
+    )
+    chart = build_chart(song, DIFFICULTIES["normal"])
+    assert catches(chart) and hazards(chart)
+    for h in hazards(chart):
+        assert abs((h.t - 0.5) / 2.0 - round((h.t - 0.5) / 2.0)) < 0.02, h.t  # only on the big hits
+    assert [n.t for n in chart.notes] == sorted(n.t for n in chart.notes)
+
+
+def test_no_drums_no_hazards():
+    chart = build_chart(make_song(duration=20, beats=BEATS_120), DIFFICULTIES["hard"])
+    assert hazards(chart) == []
+
+
+def test_hazards_stay_away_from_the_melody():
+    song = make_song(
+        duration=30,
+        beats=BEATS_120,
+        pitch=lambda t: 0.2 + 0.6 * ((t // 4) % 2),  # melody alternates low and high
+        percussive=lambda t: 1.0 if (t * 2) % 2 < 0.05 else 0.2,
+    )
+    chart = build_chart(song, DIFFICULTIES["hard"])
+    times = [n.t for n in catches(chart)]
+    pitches = [n.pitch for n in catches(chart)]
+    assert hazards(chart)
+    for h in hazards(chart):
+        assert abs(h.pitch - np.interp(h.t, times, pitches)) >= 0.3
+
+
+def test_harder_has_more_hazards():
+    song = make_song(duration=40, beats=BEATS_120, percussive=lambda t: (np.sin(t * 13) + 1) / 2)
+    counts = [len(hazards(build_chart(song, DIFFICULTIES[d]))) for d in ("easy", "normal", "hard")]
+    assert counts[0] < counts[1] < counts[2]
+
+
+def test_melody_jumps_are_made_reachable():
+    from pitch_dodge.chart import make_reachable
+
+    out = make_reachable([0.0, 0.1, 0.2, 2.0], [0.0, 1.0, 0.0, 1.0], paddle_height=72)
+    assert out[1] < 0.3 and out[1] > 0  # squashed, direction kept
+    assert out[2] < out[1]
+    assert out[3] == 1.0  # plenty of time: untouched

@@ -23,9 +23,9 @@
   const PADDLE_SPEED = 560;
   const NOTE_RADIUS = 9;
   const INVULNERABLE_FOR = 1.0;
-  const NEAR_MISS_DISTANCE = 18;
-  const POINTS_DODGE = 10;
-  const POINTS_NEAR_MISS = 15;
+  const POINTS_CATCH = 10;
+  const POINTS_PERFECT = 15;
+  const PERFECT_FRACTION = 0.3;
   const STREAK_PER_LEVEL = 10;
   const MAX_MULTIPLIER = 8;
   const POINTS_PER_LIFE_LEFT = 250;
@@ -63,10 +63,12 @@
       this.chart = chart;
       this.notes = [];
       this.score = 0;
-      this.streak = 0;
+      this.streak = 0; // combo
       this.bestStreak = 0;
-      this.dodged = 0;
-      this.hits = 0;
+      this.caught = 0;
+      this.perfect = 0;
+      this.missed = 0;
+      this.hits = 0; // hazards that hit
       this.songTime = -chart.count_in;
       this.invulnerableUntil = -1e9;
       this.over = false;
@@ -82,6 +84,7 @@
     get multiplier() { return Math.min(1 + Math.floor(this.streak / STREAK_PER_LEVEL), MAX_MULTIPLIER); }
     get invulnerable() { return this.songTime < this.invulnerableUntil; }
     get speed() { return this.chart.speed; }
+    get accuracy() { const n = this.caught + this.missed; return n ? this.caught / n : 0; }
 
     xAt(noteT, now) { return PADDLE_X - (noteT - now) * this.chart.speed; }
 
@@ -107,7 +110,7 @@
         const c = notes[this.next++];
         const n = { t: c.t, y: pitchToY(c.pitch), pitch: c.pitch, kind: c.kind, strength: c.strength, midi: c.midi,
                     radius: NOTE_RADIUS * (0.85 + 0.4 * c.strength), x: -NOTE_RADIUS,
-                    passed: false, hit: false, ghosted: false, closestGap: Infinity };
+                    passed: false, hit: false };
         this.notes.push(n);
         events.push({ kind: 'spawn', x: 0, y: n.y });
       }
@@ -133,30 +136,38 @@
       if (n.passed) return;
       const p = this.paddle;
       const crossing = xPrev - n.radius <= p.x + p.width && n.x + n.radius >= p.x;
-      const gap = this.gapY(n);
-      if (crossing) {
-        n.closestGap = Math.min(n.closestGap, gap);
-        if (gap < 0 && this.invulnerable) n.ghosted = true;
-        else if (gap < 0) { this.hit(n, events); return; }
-      }
-      if (n.x - n.radius > p.x + p.width) {
+      const touching = crossing && this.gapY(n) < 0;
+      const gone = n.x - n.radius > p.x + p.width;
+      if (n.kind === 'hazard') {
+        if (touching && !this.invulnerable) this.hurt(n, events);
+        else if (gone) n.passed = true;
+      } else if (touching) {
+        this.catch(n, events);
+      } else if (gone) {
         n.passed = true;
-        if (n.ghosted) return;
-        const oldLevel = this.multiplier;
-        this.dodged++;
-        this.streak++;
-        this.bestStreak = Math.max(this.bestStreak, this.streak);
-        const near = n.closestGap < NEAR_MISS_DISTANCE;
-        const points = (near ? POINTS_NEAR_MISS : POINTS_DODGE) * oldLevel;
-        this.score += points;
-        events.push({ kind: near ? 'near_miss' : 'dodge', x: n.x, y: n.y, value: points, midi: n.midi });
-        if (this.multiplier > oldLevel) {
-          events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier, midi: n.midi });
-        }
+        this.missed++;
+        this.streak = 0;
+        events.push({ kind: 'miss', x: n.x, y: n.y });
       }
     }
 
-    hit(n, events) {
+    catch(n, events) {
+      n.hit = n.passed = true;
+      const oldLevel = this.multiplier;
+      const perfect = Math.abs(n.y - this.paddle.y) <= (this.paddle.height / 2) * PERFECT_FRACTION;
+      this.caught++;
+      if (perfect) this.perfect++;
+      this.streak++;
+      this.bestStreak = Math.max(this.bestStreak, this.streak);
+      const points = (perfect ? POINTS_PERFECT : POINTS_CATCH) * oldLevel;
+      this.score += points;
+      events.push({ kind: perfect ? 'perfect' : 'catch', x: n.x, y: n.y, value: points, midi: n.midi });
+      if (this.multiplier > oldLevel) {
+        events.push({ kind: 'level_up', x: n.x, y: n.y, value: this.multiplier, midi: n.midi });
+      }
+    }
+
+    hurt(n, events) {
       n.hit = n.passed = true;
       this.hits++;
       this.lives--;
@@ -257,9 +268,9 @@
       const hz = (m) => 440 * 2 ** ((m - 69) / 12);
       const presets = {
         hit:       { freqs: [110, 82], dur: 0.35, vol: 0.35, type: 'sawtooth' },
-        dodge:     { freqs: [hz(midi)], dur: 0.18, vol: 0.05, type: 'triangle' },
-        near_miss: { freqs: [hz(midi), hz(midi + 12)], dur: 0.25, vol: 0.07, type: 'triangle' },
-        catch:     { freqs: [hz(midi), hz(midi + 12)], dur: 0.3, vol: 0.09, type: 'triangle' },
+        catch:     { freqs: [hz(midi), hz(midi + 12)], dur: 0.3, vol: 0.08, type: 'triangle' },
+        perfect:   { freqs: [hz(midi), hz(midi + 12), hz(midi + 19)], dur: 0.35, vol: 0.09, type: 'triangle' },
+        miss:      { freqs: [hz(midi - 24)], dur: 0.12, vol: 0.03, type: 'sine' },
         level_up:  { freqs: [hz(midi), hz(midi + 7), hz(midi + 12)], dur: 0.35, vol: 0.08, type: 'triangle', arp: 0.06 },
         game_over: { freqs: [196, 147, 98], dur: 0.9, vol: 0.2, type: 'triangle', arp: 0.18 },
         cleared:   { freqs: [523, 659, 784, 1047], dur: 0.9, vol: 0.12, type: 'triangle', arp: 0.1 },
@@ -364,17 +375,26 @@
           this.shake = 0.35;
           this.flash = 0.25;
           this.popups.push({ text: 'OUCH', x: e.x - 110, y: e.y - 20, life: 0.8, color: COLORS.danger });
-        } else if (e.kind === 'near_miss') {
-          this.burst(e.x, e.y, COLORS.gold, 14, 220);
-          this.popups.push({ text: `CLOSE! +${e.value}`, x: e.x - 150, y: e.y - 24, life: 0.8, color: COLORS.gold });
-        } else if (e.kind === 'dodge') {
-          this.burst(e.x, e.y, COLORS.accent, 6, 140, 0.4, 2);
+        } else if (e.kind === 'perfect') {
+          this.burst(e.x, e.y, COLORS.gold, 18, 240);
+          this.judge(`PERFECT +${e.value}`, e.x - 170, e.y - 26, COLORS.gold);
+        } else if (e.kind === 'catch') {
+          this.burst(e.x, e.y, COLORS.accent, 10, 180, 0.5, 3);
+        } else if (e.kind === 'miss') {
+          this.burst(e.x, e.y, COLORS.dim, 6, 80, 0.4, 2);
+          this.judge('miss', e.x - 70, e.y - 20, COLORS.dim);
         } else if (e.kind === 'level_up') {
           this.popups.push({ text: `x${e.value}!`, x: WIDTH / 2 - 30, y: HEIGHT / 2 - 40, life: 1.0, color: COLORS.accent });
         } else if (e.kind === 'spawn') {
           this.burst(6, e.y, COLORS.text, 4, 90, 0.3, 2);
         }
       }
+    }
+
+    /** Catch/miss labels replace each other instead of piling up. */
+    judge(text, x, y, color) {
+      this.popups = this.popups.filter((p) => !p.judge);
+      this.popups.push({ text, x, y, life: 0.45, color, judge: true });
     }
 
     tick(dt) {
@@ -402,6 +422,25 @@
       if (i < 0) return 0;
       const strength = i % 4 === 0 ? 1 : 0.6;
       return strength * Math.exp(-(t - beats[i]) * 8);
+    }
+
+    hazard(x, y, r, t) {
+      const c = this.ctx;
+      this.blitGlow('hsl(352, 100%, 66%)', Math.round(r * 0.6), x, y);
+      c.fillStyle = COLORS.danger;
+      c.beginPath();
+      for (let i = 0; i < 16; i++) {
+        const a = t * 3 + (i * Math.PI * 2) / 16;
+        const rr = r * (i % 2 === 0 ? 1 : 0.5);
+        const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+        i ? c.lineTo(px, py) : c.moveTo(px, py);
+      }
+      c.closePath();
+      c.fill();
+      c.fillStyle = '#280812';
+      c.beginPath();
+      c.arc(x, y, Math.max(2, r * 0.32), 0, Math.PI * 2);
+      c.fill();
     }
 
     background() {
@@ -457,18 +496,19 @@
         c.fillRect(x - 1, TOP_MARGIN, 2, HEIGHT - TOP_MARGIN);
       }
 
-      // The melody coming toward the player: whatever is at x now reaches the
-      // paddle at song time t + (PADDLE_X - x) / speed.
+      // The melody path: a line through the upcoming catch notes, where they will be.
       c.strokeStyle = '#5a46a0';
       c.lineWidth = 2;
       c.beginPath();
       let started = false;
-      for (let x = 0; x <= PADDLE_X; x += 8) {
-        const s = t + (PADDLE_X - x) / w.speed;
-        if (s < 0 || s > w.duration) { started = false; continue; }
-        const y = pitchToY(w.song.pitchAt(s));
+      for (const n of w.chart.notes) {
+        if (n.kind !== 'catch') continue;
+        const x = w.xAt(n.t, t);
+        if (x > PADDLE_X + 40) continue;
+        const y = pitchToY(n.pitch);
         started ? c.lineTo(x, y) : c.moveTo(x, y);
         started = true;
+        if (x < -40) break;
       }
       c.stroke();
       const ahead = t + w.chart.travel_time;
@@ -477,8 +517,9 @@
         this.blitGlow(pitchColor(pitch), 7 + Math.round(5 * energy + 4 * pulse), 4, pitchToY(pitch));
       }
 
-      // Notes with trails.
+      // Notes with trails; hazards are spinning red spikes.
       for (const n of w.notes) {
+        if (n.kind === 'hazard') { this.hazard(n.x, n.y, n.radius * 1.4, t); continue; }
         const color = pitchColor(n.pitch);
         for (let i = 3; i >= 1; i--) {
           c.globalAlpha = 0.5 - i * 0.12;
@@ -554,7 +595,7 @@
       c.fillText(`x${w.multiplier}`, 190, 27);
       c.font = font(14);
       c.fillStyle = COLORS.dim;
-      c.fillText(`streak ${w.streak}`, 240, 28);
+      c.fillText(`combo ${w.streak}`, 240, 28);
       if (best) c.fillText(`best ${best.toLocaleString()}`, 340, 28);
       if (muted) c.fillText('muted', 450, 28);
 
@@ -775,11 +816,10 @@
     $('results-title').textContent = w.cleared ? 'SONG CLEARED' : 'GAME OVER';
     $('results-title').style.color = w.cleared ? COLORS.accent : COLORS.danger;
     $('results-score').textContent = w.score.toLocaleString();
-    const total = w.dodged + w.hits;
     const stats = [
-      ['dodged', w.dodged], ['hits', w.hits],
-      ['accuracy', `${total ? Math.round((100 * w.dodged) / total) : 0}%`],
-      ['best streak', w.bestStreak], ['song', `${Math.round(w.progress * 100)}%`],
+      ['caught', `${w.caught} (${w.perfect} perfect)`], ['missed', w.missed],
+      ['accuracy', `${Math.round(w.accuracy * 100)}%`], ['hazards hit', w.hits],
+      ['best combo', w.bestStreak], ['song', `${Math.round(w.progress * 100)}%`],
     ];
     $('results-stats').innerHTML = '';
     for (const [k, v] of stats) {
@@ -926,22 +966,21 @@
     return (down ? 1 : 0) - (up ? 1 : 0);
   }
 
+  /** Chase the next catch note, sidestepping hazards (for demos and tests: ?autoplay). */
   function botDirection() {
-    const w = state.world;
-    const p = w.paddle;
-    const mid = (HEIGHT + TOP_MARGIN) / 2;
-    const incoming = w.notes.filter((n) => !n.passed && n.x < p.x && p.x - n.x < 260);
-    let target = mid;
-    if (incoming.length) {
-      const n = incoming.reduce((a, b) => (p.x - a.x < p.x - b.x ? a : b));
-      const ny = n.y;
-      const gap = p.height / 2 + n.radius + 14;
-      if (Math.abs(ny - p.y) > gap) return 0;
-      target = ny < mid ? ny + gap : ny - gap;
+    const p = state.world.paddle;
+    const ahead = state.world.notes.filter((n) => !n.passed && n.x < p.x + p.width);
+    const catches = ahead.filter((n) => n.kind === 'catch').sort((a, b) => a.t - b.t);
+    let target = catches.length ? catches[0].y : p.y;
+    for (const h of ahead) {
+      if (h.kind !== 'hazard' || p.x - h.x > 120) continue;
+      const clear = p.height / 2 + h.radius * 1.5 + 8;
+      if (Math.abs(h.y - target) < clear - 2) target = h.y + (target >= h.y ? 1 : -1) * clear;
     }
     const d = target - p.y;
-    return Math.abs(d) < 4 ? 0 : Math.sign(d);
+    return Math.abs(d) < 3 ? 0 : Math.sign(d);
   }
+
 
   window.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;

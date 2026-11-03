@@ -157,21 +157,17 @@ class App:
         return float(down) - float(up)
 
     def _bot_direction(self) -> float:
-        """Steer away from the nearest incoming note (good enough to look alive)."""
+        """Chase the next catch note, sidestepping hazards (good enough to look alive)."""
         w = self.world
         p = w.paddle
-        incoming = [n for n in w.notes if not n.passed and n.x < p.x and p.x - n.x < 260]
-        if not incoming:
-            target = (HEIGHT + 56) / 2
-        else:
-            n = min(incoming, key=lambda n: p.x - n.x)
-            ny = n.y
-            gap = p.height / 2 + n.radius + 14
-            if abs(ny - p.y) > gap:
-                return 0.0
-            target = ny + gap if ny < (HEIGHT + 56) / 2 else ny - gap
+        ahead = [n for n in w.notes if not n.passed and n.x < p.x + p.width]
+        catches = [n for n in ahead if n.kind == "catch"]
+        target = min(catches, key=lambda n: n.t).y if catches else p.y
+        for h in (n for n in ahead if n.kind == "hazard" and p.x - n.x < 120):
+            if abs(h.y - target) < p.height / 2 + h.radius * 1.5 + 6:
+                target = h.y + (1 if target >= h.y else -1) * (p.height / 2 + h.radius * 1.5 + 8)
         d = target - p.y
-        return 0.0 if abs(d) < 4 else (1.0 if d > 0 else -1.0)
+        return 0.0 if abs(d) < 3 else (1.0 if d > 0 else -1.0)
 
     # ------------------------------------------------------------ loop
 

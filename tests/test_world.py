@@ -5,8 +5,9 @@ from pitch_dodge.chart import ChartNote
 from pitch_dodge.config import DIFFICULTIES, HEIGHT, PADDLE_X, TOP_MARGIN, pitch_to_y
 from pitch_dodge.world import (
     INVULNERABLE_FOR,
-    POINTS_DODGE,
+    POINTS_CATCH,
     POINTS_PER_LIFE_LEFT,
+    POINTS_PERFECT,
     STREAK_PER_LEVEL,
     World,
 )
@@ -27,6 +28,12 @@ def paddle_pitch(w):
     """The pitch whose height is the paddle's centre."""
     top, bottom = TOP_MARGIN + 30, HEIGHT - 30
     return (bottom - w.paddle.y) / (bottom - top)
+
+
+def pitch_at_offset(w, dy):
+    """The pitch whose height is ``dy`` px below the paddle's centre."""
+    top, bottom = TOP_MARGIN + 30, HEIGHT - 30
+    return (bottom - (w.paddle.y + dy)) / (bottom - top)
 
 
 def world(notes, **kw):
@@ -66,70 +73,104 @@ def test_positions_independent_of_frame_rate():
     assert a.notes[0].x == pytest.approx(b.notes[0].x)
 
 
-def test_hit_costs_a_life_and_resets_streak():
+def hazard(t, pitch):
+    return ChartNote(t, pitch, kind="hazard")
+
+
+def test_catching_scores_and_builds_combo():
     w = world([])
-    w.chart.notes.append(ChartNote(t=1.0, pitch=paddle_pitch(w)))
+    w.chart.notes.append(ChartNote(1.0, paddle_pitch(w), midi=76))
+    events = run(w, 1.5)
+    kinds = [e.kind for e in events if e.kind != "spawn"]
+    assert kinds == ["perfect"]  # dead centre of the paddle
+    assert w.score == POINTS_PERFECT and w.caught == 1 and w.streak == 1
+    assert [e.midi for e in events if e.kind == "perfect"] == [76]  # sound plays in key
+    assert not w.notes  # caught notes disappear
+
+
+def test_edge_catch_is_not_perfect():
+    w = world([])
+    w.chart.notes.append(ChartNote(1.0, pitch_at_offset(w, w.paddle.height / 2 + 4)))
+    events = run(w, 1.5)
+    assert [e.kind for e in events if e.kind != "spawn"] == ["catch"]
+    assert w.score == POINTS_CATCH
+
+
+def test_missing_a_catch_note_breaks_combo_but_costs_no_life():
+    w = world([(1.0, 0.0)])
+    w.streak = 7
+    events = run(w, 1.5)
+    assert [e.kind for e in events if e.kind != "spawn"] == ["miss"]
+    assert w.streak == 0 and w.missed == 1 and w.lives == NORMAL.lives
+
+
+def test_multiplier_and_level_up():
+    w = world([])
+    w.chart.notes.append(ChartNote(1.0, paddle_pitch(w)))
+    w.streak = STREAK_PER_LEVEL - 1
+    events = run(w, 1.5)
+    assert [e.kind for e in events if e.kind != "spawn"] == ["perfect", "level_up"]
+    assert w.multiplier == 2
+
+
+def test_hazard_hit_costs_a_life_and_combo():
+    w = world([])
+    w.chart.notes.append(hazard(1.0, paddle_pitch(w)))
     w.streak = 5
     events = run(w, 1.2)
     assert "hit" in [e.kind for e in events]
     assert w.lives == NORMAL.lives - 1 and w.streak == 0 and w.invulnerable
 
 
+def test_dodged_hazard_is_harmless():
+    w = world([hazard(1.0, 0.0)])
+    events = run(w, 1.5)
+    assert [e.kind for e in events if e.kind != "spawn"] == []
+    assert w.lives == NORMAL.lives and w.score == 0
+
+
 def test_big_frame_cannot_skip_the_paddle():
     w = world([])
-    w.chart.notes.append(ChartNote(t=1.0, pitch=paddle_pitch(w)))
+    w.chart.notes.append(hazard(1.0, paddle_pitch(w)))
     w.update(0.97, 0.0, 0)
     events = w.update(1.03, 0.0, 0)  # note jumps 27px straight over the paddle column
     assert "hit" in [e.kind for e in events]
 
 
-def test_invulnerability_lets_next_note_through_without_scoring():
+def test_invulnerable_after_hit_but_can_still_catch():
     w = world([])
     p = paddle_pitch(w)
-    w.chart.notes.extend([ChartNote(1.0, p), ChartNote(1.3, p)])
-    events = run(w, 1.6)
+    w.chart.notes.extend([hazard(1.0, p), hazard(1.3, p), ChartNote(1.5, p)])
+    events = run(w, 1.8)
     kinds = [e.kind for e in events]
-    assert kinds.count("hit") == 1 and "dodge" not in kinds
+    assert kinds.count("hit") == 1 and "perfect" in kinds
     run(w, 1.0 + INVULNERABLE_FOR + 0.1)
     assert not w.invulnerable
-
-
-def test_dodge_scores_with_multiplier_and_level_up():
-    w = world([(1.0, 0.0)])
-    events = run(w, 1.5)
-    assert [e.kind for e in events if e.kind != "spawn"] == ["dodge"]
-    assert w.score == POINTS_DODGE
-
-    w = world([(1.0, 0.0)])
-    w.streak = STREAK_PER_LEVEL - 1
-    events = run(w, 1.5)
-    assert [e.kind for e in events if e.kind != "spawn"] == ["dodge", "level_up"]
-
-
-def test_near_miss():
-    w = world([])
-    gap_px = w.paddle.height / 2 + 9 * 1.05 + 6  # radius at strength 0.5 is 9 * 1.05
-    top, bottom = TOP_MARGIN + 30, HEIGHT - 30
-    pitch = (bottom - (w.paddle.y - gap_px)) / (bottom - top)
-    w.chart.notes.append(ChartNote(1.0, pitch))
-    events = run(w, 1.5)
-    assert "near_miss" in [e.kind for e in events]
 
 
 def test_game_over_and_frozen():
     w = world([])
     w.lives = 1
-    w.chart.notes.append(ChartNote(1.0, paddle_pitch(w)))
+    w.chart.notes.append(hazard(1.0, paddle_pitch(w)))
     events = run(w, 1.2)
     assert w.over and events[-1].kind == "game_over"
     assert w.update(5, 1, 0) == []
 
 
 def test_clearing_awards_life_bonus():
-    w = world([(0.5, 0.0)], duration=1.0)
+    w = world([], duration=1.0)
+    w.chart.notes.append(ChartNote(0.5, paddle_pitch(w)))
     events = run(w, 1.5)
     assert w.cleared and events[-1].kind == "cleared"
-    assert w.score == POINTS_DODGE + NORMAL.lives * POINTS_PER_LIFE_LEFT
+    assert w.score == POINTS_PERFECT + NORMAL.lives * POINTS_PER_LIFE_LEFT
+
+
+def test_accuracy():
+    w = world([])
+    w.chart.notes.extend([ChartNote(1.0, paddle_pitch(w)), ChartNote(1.5, 0.0), ChartNote(2.0, 1.0)])
+    run(w, 2.5)
+    assert (w.caught, w.missed) == (1, 2)
+    assert w.accuracy == pytest.approx(1 / 3)
 
 
 def test_paddle_stays_on_screen():
@@ -143,12 +184,6 @@ def test_paddle_stays_on_screen():
 def test_pitch_to_y_maps_high_to_top():
     assert pitch_to_y(1.0) < pitch_to_y(0.5) < pitch_to_y(0.0)
     assert pitch_to_y(5) == pitch_to_y(1)
-
-
-def test_dodge_events_carry_midi_for_tuned_sounds():
-    w = world([ChartNote(1.0, 0.0, midi=76)])
-    events = run(w, 1.5)
-    assert [e.midi for e in events if e.kind == "dodge"] == [76]
 
 
 def test_beat_pulse():

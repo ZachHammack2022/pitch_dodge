@@ -28,6 +28,8 @@ class Difficulty:
     min_gap: float  # never two notes closer than this, seconds
     max_gap: float  # fill silences longer than this, seconds
     paddle_height: int
+    hazard_quantile: float = 0.85  # drum hits stronger than this share of the song become hazards
+    hazard_min_gap: float = 0.7  # seconds between hazards
 
     @property
     def travel_time(self) -> float:
@@ -37,13 +39,37 @@ class Difficulty:
 
 DIFFICULTIES = {
     "easy": Difficulty(
-        "easy", lives=5, speed=380, subdivision=0, min_gap=0.32, max_gap=2.0, paddle_height=72
+        "easy",
+        lives=5,
+        speed=380,
+        subdivision=0,
+        min_gap=0.32,
+        max_gap=2.0,
+        paddle_height=80,
+        hazard_quantile=0.94,
+        hazard_min_gap=1.4,
     ),
     "normal": Difficulty(
-        "normal", lives=3, speed=450, subdivision=1, min_gap=0.20, max_gap=1.6, paddle_height=72
+        "normal",
+        lives=3,
+        speed=450,
+        subdivision=1,
+        min_gap=0.20,
+        max_gap=1.6,
+        paddle_height=72,
+        hazard_quantile=0.86,
+        hazard_min_gap=0.7,
     ),
     "hard": Difficulty(
-        "hard", lives=2, speed=540, subdivision=2, min_gap=0.12, max_gap=1.2, paddle_height=72
+        "hard",
+        lives=3,
+        speed=540,
+        subdivision=2,
+        min_gap=0.12,
+        max_gap=1.2,
+        paddle_height=64,
+        hazard_quantile=0.75,
+        hazard_min_gap=0.4,
     ),
 }
 

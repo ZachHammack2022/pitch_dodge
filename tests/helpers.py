@@ -28,8 +28,8 @@ def make_song(duration=10.0, beats=(), onsets=(), pitch=0.5, strength=None, harm
         duration=duration,
         beats=np.asarray(beats, dtype=float),
         onset_strength=env(strength, 0.5),
-        harmonic_strength=env(harmonic, 0.5),
-        percussive_strength=env(percussive, 0.5),
+        harmonic_strength=env(harmonic if harmonic is not None else strength, 0.5),
+        percussive_strength=env(percussive, 0.0),
         pitch_class=np.zeros(n, dtype=int),
     )
 

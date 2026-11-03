@@ -31,7 +31,6 @@ class Sfx:
         try:
             self.sounds = {
                 "hit": _tone([110, 82], 0.35, 0.6, 9, noise=0.4),
-                "near_miss": _tone([1320, 1760], 0.15, 0.25, 25),
                 "level_up": _tone([660, 880, 1320], 0.4, 0.3, 7),
                 "game_over": _tone([196, 147, 98], 1.0, 0.45, 3),
                 "cleared": _tone([523, 659, 784, 1047], 1.0, 0.35, 3),
@@ -40,7 +39,7 @@ class Sfx:
             self.sounds = {}
 
     # Success sounds play the song's current pitch class (see ChartNote.midi).
-    TUNED = {"dodge": (0.12, 0.18), "near_miss": (0.2, 0.25), "catch": (0.25, 0.3)}  # volume, duration
+    TUNED = {"catch": (0.22, 0.3), "perfect": (0.28, 0.35)}  # volume, duration
 
     def _tuned(self, kind: str, midi: int):
         key = (kind, midi)

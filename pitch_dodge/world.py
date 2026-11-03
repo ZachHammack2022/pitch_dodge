@@ -1,5 +1,9 @@
 """Game rules, with no pygame in sight so they can be unit tested.
 
+Catch the melody, dodge the drums: catch notes ride the song's pitch line and
+score when they meet the paddle; missing one breaks the combo. Hazards fall on
+the strongest drum hits; touching one costs a life.
+
 The World plays a Chart (see chart.py). Each note's position comes straight
 from the song time, ``x = PADDLE_X - (arrival - now) * speed``, so a note
 crosses the paddle exactly on its beat however uneven the frame rate is.
@@ -24,10 +28,10 @@ from .config import (  # noqa: F401  (re-exported for older imports)
     pitch_to_y,
 )
 
-INVULNERABLE_FOR = 1.0  # seconds after a hit
-NEAR_MISS_DISTANCE = 18  # px between note edge and paddle edge
-POINTS_DODGE = 10
-POINTS_NEAR_MISS = 15
+INVULNERABLE_FOR = 1.0  # seconds after a hazard hit
+POINTS_CATCH = 10
+POINTS_PERFECT = 15  # caught near the middle of the paddle
+PERFECT_FRACTION = 0.3  # "near the middle" = within this fraction of the paddle's half-height
 STREAK_PER_LEVEL = 10
 MAX_MULTIPLIER = 8
 POINTS_PER_LIFE_LEFT = 250
@@ -44,10 +48,8 @@ class Note:
     x: float = -NOTE_RADIUS
     vx: float = 0.0
     radius: float = NOTE_RADIUS
-    passed: bool = False
-    hit: bool = False
-    ghosted: bool = False  # went through the paddle while it was invulnerable
-    closest_gap: float = float("inf")
+    passed: bool = False  # resolved: caught, missed, hit or dodged
+    hit: bool = False  # touched the paddle (caught, or a hazard that hurt); removed from play
 
     @classmethod
     def from_chart(cls, n: ChartNote, speed: float) -> Note:
@@ -92,7 +94,8 @@ class Paddle:
 
 @dataclass
 class Event:
-    kind: str  # "spawn" | "dodge" | "near_miss" | "hit" | "level_up" | "game_over" | "cleared"
+    # "spawn" | "catch" | "perfect" | "miss" | "hit" | "level_up" | "game_over" | "cleared"
+    kind: str
     x: float = 0.0
     y: float = 0.0
     value: int = 0
@@ -107,10 +110,12 @@ class World:
 
     notes: list[Note] = field(default_factory=list)
     score: int = 0
-    streak: int = 0
+    streak: int = 0  # current combo
     best_streak: int = 0
-    dodged: int = 0
-    hits: int = 0
+    caught: int = 0
+    perfect: int = 0
+    missed: int = 0
+    hits: int = 0  # hazards that hit
     song_time: float = 0.0
     invulnerable_until: float = -1e9
     over: bool = False
@@ -188,6 +193,11 @@ class World:
             events.append(Event("cleared", value=bonus))
         return events
 
+    @property
+    def accuracy(self) -> float:
+        total = self.caught + self.missed
+        return self.caught / total if total else 0.0
+
     def _step(self, note: Note, prev: float, now: float, events: list[Event]) -> None:
         x_prev = self.x_at(note.t, prev)
         note.x = self.x_at(note.t, now)
@@ -197,33 +207,37 @@ class World:
         p = self.paddle
         # Did the note's path this frame cross the paddle's column?
         crossing = x_prev - note.radius <= p.x + p.width and note.x + note.radius >= p.x
-        gap = p.gap_y(note)
-        if crossing:
-            note.closest_gap = min(note.closest_gap, gap)
-            if gap < 0 and self.invulnerable:
-                note.ghosted = True
-            elif gap < 0:
-                self._hit(note, events)
-                return
+        touching = crossing and p.gap_y(note) < 0
+        if note.kind == "hazard":
+            if touching and not self.invulnerable:
+                self._hurt(note, events)
+            elif note.x - note.radius > p.x + p.width:
+                note.passed = True  # dodged
+        else:
+            if touching:
+                self._catch(note, events)
+            elif note.x - note.radius > p.x + p.width:
+                note.passed = True
+                self.missed += 1
+                self.streak = 0
+                events.append(Event("miss", note.x, note.y))
 
-        if note.x - note.radius > p.x + p.width:
-            note.passed = True
-            if note.ghosted:
-                return
-            old_level = self.multiplier
-            self.dodged += 1
-            self.streak += 1
-            self.best_streak = max(self.best_streak, self.streak)
-            near = note.closest_gap < NEAR_MISS_DISTANCE
-            points = (POINTS_NEAR_MISS if near else POINTS_DODGE) * old_level
-            self.score += points
-            events.append(Event("near_miss" if near else "dodge", note.x, note.y, points, note.midi))
-            if self.multiplier > old_level:
-                events.append(Event("level_up", note.x, note.y, self.multiplier, note.midi))
+    def _catch(self, note: Note, events: list[Event]) -> None:
+        note.hit = note.passed = True
+        old_level = self.multiplier
+        perfect = abs(note.y - self.paddle.y) <= self.paddle.height / 2 * PERFECT_FRACTION
+        self.caught += 1
+        self.perfect += perfect
+        self.streak += 1
+        self.best_streak = max(self.best_streak, self.streak)
+        points = (POINTS_PERFECT if perfect else POINTS_CATCH) * old_level
+        self.score += points
+        events.append(Event("perfect" if perfect else "catch", note.x, note.y, points, note.midi))
+        if self.multiplier > old_level:
+            events.append(Event("level_up", note.x, note.y, self.multiplier, note.midi))
 
-    def _hit(self, note: Note, events: list[Event]) -> None:
-        note.hit = True
-        note.passed = True
+    def _hurt(self, note: Note, events: list[Event]) -> None:
+        note.hit = note.passed = True
         self.hits += 1
         self.lives -= 1
         self.streak = 0
